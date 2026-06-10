@@ -1,0 +1,20 @@
+{
+  "name": "skoda-reports",
+  "version": "1.0.0",
+  "description": "Standalone analytical reports & MIS service for Skoda Sales Claims (Tactical & Base payouts)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js",
+    "init": "node seed.js && node server.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "sql.js": "^1.10.3",
+    "xlsx": "^0.18.5"
+  }
+}
