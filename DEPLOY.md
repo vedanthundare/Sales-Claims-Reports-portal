@@ -97,6 +97,43 @@ curl https://<your-service>.onrender.com/api/meta | jq '.reports | length'
 # expect: 9
 ```
 
+## Splitting the deploy: frontend on Vercel + API on Render
+
+If the Render free tier's cold starts (15-min sleep) bother you, you can keep
+the API on Render but serve the **frontend on Vercel's edge CDN** — it stays
+instant 24/7 because Vercel only ships static files.
+
+### How the split works
+
+* `public/index.html` reads `window.__API_BASE` from `public/config.js`.
+* On Render (single-service deploy) `__API_BASE = ""` → relative `/api/*`.
+* On Vercel (frontend only) `__API_BASE = "https://...onrender.com"` →
+  the browser calls Render directly. CORS is already wide-open in
+  `server.js`, so no extra config is needed.
+
+### Steps
+
+1. The repo already contains `vercel.json` (sets `outputDirectory: "public"`).
+2. Make sure `public/config.js` points at your Render API URL — it ships with
+   `https://sales-claims-reports-portal.onrender.com`; edit it if your Render
+   service has a different hostname.
+3. <https://vercel.com/new> → **Import** the GitHub repo
+   `Sales-Claims-Reports-portal`.
+4. Vercel auto-detects `vercel.json`. Leave **Framework Preset** as *Other*.
+   Click **Deploy**.
+5. ~30 seconds later you have an HTTPS URL like
+   `sales-claims-reports-portal.vercel.app` serving the dashboard. The
+   browser fetches data from Render in the background.
+
+### Caveats
+
+* The **Render API still needs to stay up** — Vercel only hosts the UI.
+  If Render is asleep, the dashboard will load but show empty until Render
+  wakes (~30 s on first request).
+* Updating `config.js` requires a Vercel redeploy (push to GitHub). You
+  can also use Vercel **Environment Variables** for this if you want, but
+  that needs a build step; the static-config approach is simpler.
+
 ## Alternative: deploy somewhere else
 
 The same code runs unchanged on:

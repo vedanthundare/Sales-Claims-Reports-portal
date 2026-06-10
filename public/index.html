@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="/config.js"></script>
 <style>
 /* ============================================================
    Skoda Sales Claims — Reports & MIS
@@ -861,10 +862,22 @@ function countUp(el, target, isInr = false, duration = 700) {
 }
 
 /* ============================================================
+   API base URL
+   ------------------------------------------------------------
+   When this page is served from the same origin as the Node
+   API (Render single-service deploy), we use relative paths.
+   When the frontend is hosted on Vercel as a separate static
+   site, set window.__API_BASE in config.js to the Render URL,
+   e.g. "https://sales-claims-reports-portal.onrender.com".
+   ============================================================ */
+const API_BASE = (window.__API_BASE || '').replace(/\/$/, '');
+const API = (path) => `${API_BASE}${path}`;
+
+/* ============================================================
    Bootstrap
    ============================================================ */
 async function loadMeta() {
-    const r = await fetch('/api/meta');
+    const r = await fetch(API('/api/meta'));
     META = await r.json();
     document.getElementById('env-info').innerHTML = `
         <strong>${META.reports.length}</strong> reports ·
@@ -999,7 +1012,7 @@ async function runReport() {
     document.getElementById('chart-wrap').style.display = 'none';
     setDownloadEnabled(false);
     try {
-        const r = await fetch(`/api/reports/${CURRENT.id}?${qs}`);
+        const r = await fetch(API(`/api/reports/${CURRENT.id}?${qs}`));
         const data = await r.json();
         renderResult(data);
         setDownloadEnabled(true);
@@ -1146,7 +1159,7 @@ function download(fmt) {
     const f = getFilters();
     f.format = fmt;
     const qs = new URLSearchParams(f).toString();
-    window.location.href = `/api/reports/${CURRENT.id}/download?${qs}`;
+    window.location.href = API(`/api/reports/${CURRENT.id}/download?${qs}`);
 }
 
 document.getElementById('run-btn').onclick = runReport;
