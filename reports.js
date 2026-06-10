@@ -440,6 +440,7 @@ const reports = {
             id: 'dispute_heatmap',
             title: '8. Corporate & Exchange Claim Dispute Heatmap',
             description: 'Disputes by dealer / region / scheme; root-cause taxonomy.',
+            viz: 'heatmap',
             columns: [
                 { key: 'dealer_name',     label: 'Dealer',       fmt: 'text' },
                 { key: 'region',          label: 'Region',       fmt: 'text' },
@@ -482,10 +483,63 @@ const reports = {
                     : r.dispute_count >= 4 ? 'WARM'
                     : 'COOL'
             }));
-            return { rows, summary: {
-                hot_dealers: rows.filter(r=>r.heat==='HOT').length,
-                total_disputes: rows.reduce((s,r)=>s+(r.dispute_count||0),0)
-            }};
+
+            // ─── Region × Scheme-type matrix (the actual heatmap) ──────
+            const matrixSql = `
+                SELECT d.region                AS region,
+                       s.scheme_type           AS scheme_type,
+                       SUM(c.is_dispute)       AS disputes,
+                       ROUND(AVG(CASE WHEN ev.event_date IS NOT NULL
+                                      THEN julianday(ev.event_date) - julianday(c.rejected_on) END), 1) AS avg_resolution_days
+                  FROM claims c
+                  JOIN dealers d ON d.dealer_code = c.dealer_code
+                  JOIN schemes s ON s.scheme_code = c.scheme_code
+             LEFT JOIN claim_events ev ON ev.claim_id = c.claim_id AND ev.event_type = 'DISPUTE_CLOSED'
+                  ${whereSQL}${auto}
+                 GROUP BY d.region, s.scheme_type
+                 HAVING disputes > 0
+            `;
+            const matrixRows = db.prepare(matrixSql).all(params);
+
+            // ─── Root-cause distribution (Corporate + Exchange) ───────
+            const rootSql = `
+                SELECT c.dispute_root_cause AS cause, COUNT(*) AS cnt
+                  FROM claims c
+                  JOIN dealers d ON d.dealer_code = c.dealer_code
+                  JOIN schemes s ON s.scheme_code = c.scheme_code
+                 WHERE c.is_dispute = 1 AND c.dispute_root_cause IS NOT NULL
+                   ${whereSQL ? whereSQL.replace(/^WHERE/, 'AND') : ''}
+                   ${auto.replace(/^WHERE/, 'AND')}
+                 GROUP BY c.dispute_root_cause
+                 ORDER BY cnt DESC
+            `;
+            const rootCauses = db.prepare(rootSql).all(params);
+
+            // Build pivoted matrix the frontend can render directly
+            const regions = [...new Set(matrixRows.map(r => r.region))].sort();
+            const schemeTypes = [...new Set(matrixRows.map(r => r.scheme_type))].sort();
+            const cells = {};
+            let maxDisputes = 0;
+            matrixRows.forEach(r => {
+                cells[`${r.region}::${r.scheme_type}`] = {
+                    disputes: r.disputes,
+                    avg_resolution_days: r.avg_resolution_days
+                };
+                if (r.disputes > maxDisputes) maxDisputes = r.disputes;
+            });
+
+            return {
+                rows,
+                summary: {
+                    hot_dealers: rows.filter(r => r.heat === 'HOT').length,
+                    total_disputes: rows.reduce((s, r) => s + (r.dispute_count || 0), 0),
+                    regions_affected: regions.length
+                },
+                heatmap: {
+                    regions, scheme_types: schemeTypes, cells, max: maxDisputes
+                },
+                root_causes: rootCauses
+            };
         }
     },
 

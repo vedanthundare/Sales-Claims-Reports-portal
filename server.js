@@ -66,8 +66,8 @@ app.get('/api/reports/:id', (req, res) => {
     const def = reports[req.params.id];
     if (!def) return res.status(404).json({ error: 'Unknown report' });
     try {
-        const { rows, summary } = def.run(db, req.query);
-        res.json({ meta: def.meta, filters: req.query, rows, summary });
+        const result = def.run(db, req.query);
+        res.json({ meta: def.meta, filters: req.query, ...result });
     } catch (err) {
         console.error('[report]', req.params.id, err);
         res.status(500).json({ error: err.message });

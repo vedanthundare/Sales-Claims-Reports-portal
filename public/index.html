@@ -723,6 +723,116 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 /* ============================================================
+   Heatmap visualization (Report 8)
+   ============================================================ */
+.viz-card {
+    background: linear-gradient(180deg, #fafbfc 0%, #fff 100%);
+    border-bottom: 1px solid var(--border-soft);
+    padding: 22px;
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 22px;
+    animation: fadeUp .5s ease-out;
+}
+.viz-block h4 {
+    margin: 0 0 12px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--muted);
+}
+.heatmap-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 4px;
+    font-size: 11px;
+}
+.heatmap-table th,
+.heatmap-table td {
+    padding: 0;
+    text-align: center;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+.heatmap-table th {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    padding: 6px 8px;
+}
+.heatmap-table th.row-head {
+    text-align: right;
+    color: var(--text-2);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
+}
+.heat-cell {
+    width: 100%;
+    height: 64px;
+    border-radius: 8px;
+    color: #fff;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    font-weight: 700;
+    font-size: 16px;
+    cursor: default;
+    position: relative;
+    transition: transform .18s, box-shadow .18s;
+    opacity: 0;
+    animation: fadeUp .45s ease-out forwards;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.15);
+}
+.heat-cell:hover {
+    transform: scale(1.06);
+    box-shadow: 0 6px 20px rgba(14, 58, 47, .35),
+                inset 0 0 0 2px rgba(255,255,255,.4);
+    z-index: 2;
+}
+.heat-cell .hc-meta {
+    font-size: 9px;
+    font-weight: 500;
+    opacity: .85;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    margin-top: 2px;
+}
+.heat-cell.empty {
+    background: #f1f3f5;
+    color: var(--muted-2);
+    box-shadow: inset 0 0 0 1px var(--border);
+    font-size: 14px;
+    font-weight: 400;
+}
+.heatmap-legend {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--muted);
+}
+.heatmap-legend .gradient {
+    flex: 1;
+    height: 8px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #e8f5ec 0%, #78FAAE 30%, #f59e0b 65%, #d92d20 100%);
+}
+
+.rootcause-canvas {
+    width: 100% !important;
+    height: 220px !important;
+}
+
+@media (max-width: 900px) {
+    .viz-card { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
    Mobile
    ============================================================ */
 @media (max-width: 960px) {
@@ -799,6 +909,7 @@ tbody tr:last-child td { border-bottom: none; }
             <div class="chart-wrap" id="chart-wrap" style="display:none">
                 <canvas id="chart"></canvas>
             </div>
+            <div class="viz-card" id="heatmap-wrap" style="display:none"></div>
             <div id="result-area">
                 <div class="empty">
                     <div class="empty-icon">📊</div>
@@ -831,6 +942,7 @@ const FMT = {
 let META = null;
 let CURRENT = null;
 let CHART = null;
+let ROOTCAUSE_CHART = null;
 
 /* ============================================================
    Microanimation utils
@@ -1010,6 +1122,7 @@ async function runReport() {
     const area = document.getElementById('result-area');
     area.innerHTML = '<div class="loader"><div class="spinner"></div>Running query…</div>';
     document.getElementById('chart-wrap').style.display = 'none';
+    clearHeatmap();
     setDownloadEnabled(false);
     try {
         const r = await fetch(API(`/api/reports/${CURRENT.id}?${qs}`));
@@ -1036,7 +1149,15 @@ function renderResult(data) {
     }
 
     renderKpis(data.summary || {}, data.rows.length);
-    renderChart(data);
+
+    // Custom viz: heatmap (Report 8)
+    if (data.meta.viz === 'heatmap' && data.heatmap) {
+        renderHeatmap(data);
+        document.getElementById('chart-wrap').style.display = 'none';
+    } else {
+        clearHeatmap();
+        renderChart(data);
+    }
 
     const cols = data.meta.columns;
     let html = '<div class="table-wrap"><table><thead><tr>';
@@ -1072,6 +1193,137 @@ function renderKpis(summary, rowCount) {
             setTimeout(() => countUp(tile.querySelector('.kpi-val'), v, isInrLike), 250 + idx * 60);
         }
     });
+}
+
+/* ============================================================
+   Heatmap (Report 8 — Corporate & Exchange Dispute Heatmap)
+   ============================================================ */
+function heatColor(value, max) {
+    if (!value || value <= 0) return '#f1f3f5';
+    const t = Math.min(1, value / Math.max(1, max));
+    // 4-stop gradient: mint → yellow → orange → red
+    const stops = [
+        { p: 0.00, r: 232, g: 245, b: 236 },
+        { p: 0.25, r: 120, g: 250, b: 174 },
+        { p: 0.55, r: 245, g: 158, b: 11  },
+        { p: 0.80, r: 234, g: 88,  b: 12  },
+        { p: 1.00, r: 217, g: 45,  b: 32  }
+    ];
+    let lo = stops[0], hi = stops[stops.length - 1];
+    for (let i = 0; i < stops.length - 1; i++) {
+        if (t >= stops[i].p && t <= stops[i + 1].p) { lo = stops[i]; hi = stops[i + 1]; break; }
+    }
+    const range = hi.p - lo.p || 1;
+    const k = (t - lo.p) / range;
+    const r = Math.round(lo.r + (hi.r - lo.r) * k);
+    const g = Math.round(lo.g + (hi.g - lo.g) * k);
+    const b = Math.round(lo.b + (hi.b - lo.b) * k);
+    return `rgb(${r},${g},${b})`;
+}
+
+function clearHeatmap() {
+    document.getElementById('heatmap-wrap').style.display = 'none';
+    if (ROOTCAUSE_CHART) { ROOTCAUSE_CHART.destroy(); ROOTCAUSE_CHART = null; }
+}
+
+function renderHeatmap(data) {
+    const wrap = document.getElementById('heatmap-wrap');
+    const { regions, scheme_types, cells, max } = data.heatmap;
+    const causes = data.root_causes || [];
+
+    let cellIdx = 0;
+    let gridHtml = '<table class="heatmap-table"><thead><tr><th></th>';
+    scheme_types.forEach(st => gridHtml += `<th>${st.replace('_', ' ')}</th>`);
+    gridHtml += '</tr></thead><tbody>';
+    regions.forEach(region => {
+        gridHtml += `<tr><th class="row-head">${region}</th>`;
+        scheme_types.forEach(st => {
+            const cell = cells[`${region}::${st}`];
+            const disputes = cell?.disputes || 0;
+            const days = cell?.avg_resolution_days;
+            const bg = heatColor(disputes, max);
+            const delay = (cellIdx++ * 0.04) + 's';
+            const tooltip = cell
+                ? `${region} × ${st} — ${disputes} disputes${days ? ` · avg resolve ${days} days` : ''}`
+                : `${region} × ${st} — no disputes`;
+            const isEmpty = !cell;
+            gridHtml += `
+                <td>
+                  <div class="heat-cell ${isEmpty ? 'empty' : ''}"
+                       style="background:${bg}; animation-delay:${delay}"
+                       title="${tooltip}">
+                    ${isEmpty ? '—' : disputes}
+                    ${days ? `<span class="hc-meta">${days}d resolve</span>` : ''}
+                  </div>
+                </td>`;
+        });
+        gridHtml += '</tr>';
+    });
+    gridHtml += '</tbody></table>';
+    gridHtml += `
+        <div class="heatmap-legend">
+            <span>Low</span>
+            <div class="gradient"></div>
+            <span>High (${max})</span>
+        </div>
+    `;
+
+    wrap.innerHTML = `
+        <div class="viz-block">
+            <h4>Region × Scheme-Type Dispute Heatmap</h4>
+            ${gridHtml}
+        </div>
+        <div class="viz-block">
+            <h4>Root-Cause Distribution</h4>
+            <canvas id="rootcause-chart" class="rootcause-canvas"></canvas>
+        </div>
+    `;
+    wrap.style.display = 'grid';
+
+    // Doughnut for root causes
+    if (ROOTCAUSE_CHART) { ROOTCAUSE_CHART.destroy(); ROOTCAUSE_CHART = null; }
+    if (causes.length) {
+        const ctx = document.getElementById('rootcause-chart').getContext('2d');
+        const palette = ['#0E3A2F', '#78FAAE', '#f59e0b', '#3b82f6', '#d92d20', '#a855f7'];
+        ROOTCAUSE_CHART = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: causes.map(c => c.cause),
+                datasets: [{
+                    data: causes.map(c => c.cnt),
+                    backgroundColor: causes.map((_, i) => palette[i % palette.length]),
+                    borderColor: '#fff',
+                    borderWidth: 2,
+                    hoverOffset: 8
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                cutout: '62%',
+                animation: { animateRotate: true, duration: 800, easing: 'easeOutCubic' },
+                plugins: {
+                    legend: {
+                        position: 'right',
+                        labels: { font: { size: 11 }, color: '#374151', boxWidth: 12, padding: 10 }
+                    },
+                    tooltip: {
+                        backgroundColor: '#0E3A2F',
+                        titleColor: '#78FAAE',
+                        cornerRadius: 8,
+                        borderColor: '#78FAAE',
+                        borderWidth: 1,
+                        callbacks: {
+                            label: (ctx) => {
+                                const total = ctx.dataset.data.reduce((s, v) => s + v, 0);
+                                const pct = ((ctx.parsed / total) * 100).toFixed(1);
+                                return `${ctx.label}: ${ctx.parsed} (${pct}%)`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
 /* ============================================================
