@@ -206,12 +206,14 @@ async function main() {
     const RETAIL_COLS = ['vin','record_id','dealer_code','dealer_short_name','ws_dealer_code','ws_date',
                          'model_code','model_group','model_desc','variant','booking_date','delivery_date',
                          'period_yyyymm','customer_state','zone','rsm'];
-    const insertRetail = db.prepare(insertSql('retail_sale', RETAIL_COLS, { onConflict: 'ignore', conflictKey: 'vin' }));
     const modelSet = new Map();
+    const retailBatch = [];
+    const seenVin = new Set();
 
     for (const row of retailRows) {
         const vin = clean(pickField(row, 'VIN', 'Chassis Number'));
-        if (!vin) continue;
+        if (!vin || seenVin.has(vin)) continue;
+        seenVin.add(vin);
         const modelCode = clean(pickField(row, 'Model Code1', 'Model Code'));
         const modelDesc = clean(pickField(row, 'Model Desc', 'Model'));
         const group     = modelGroupOf(modelCode, modelDesc) || clean(row['Model Group Names']);
@@ -230,9 +232,10 @@ async function main() {
         if (modelCode && !modelSet.has(modelCode)) {
             modelSet.set(modelCode, { model_desc: modelDesc, model_group: group });
         }
-        await insertRetail.run({
+        if (!dealerCode) continue; // NOT NULL in schema
+        retailBatch.push({
             vin,
-            record_id: clean(pickField(row, 'Record Id', 'Record Id (Qualified Lead - Vehicle)')),
+            record_id: clean(pickField(row, 'Record Id', 'Record Id (Qualified Lead - Vehicle)')) || null,
             dealer_code: dealerCode,
             dealer_short_name: shortName || null,
             ws_dealer_code: wsDealer || null,
@@ -249,6 +252,8 @@ async function main() {
             rsm: clean(row.RSM) || null
         });
     }
+    console.log('   flushing retail_sale (bulk)…');
+    await db.bulkInsert('retail_sale', RETAIL_COLS, retailBatch, { onConflict: 'ignore', conflictKey: 'vin' });
 
     // ---------- Wholesale ----------
     console.log('▶ SKSL2026M03_575.xlsx / Wholesale Mar\'26 (wholesale_sale)');
@@ -259,11 +264,12 @@ async function main() {
     const WS_COLS = ['chassis','commission_number','dealer_code','dealer_short_name','model_code','model_group',
                      'variant','invoice_number','invoice_date','invoice_amount','ws_date','period_yyyymm',
                      'basic_price','dealer_price','tax_amount','state_code','zone','rsm'];
-    const insertWs = db.prepare(insertSql('wholesale_sale', WS_COLS, { onConflict: 'ignore', conflictKey: 'chassis' }));
-
+    const wsBatch = [];
+    const seenChassis = new Set();
     for (const row of wsRows) {
         const chassis = clean(pickField(row, 'Chassis Number'));
-        if (!chassis) continue;
+        if (!chassis || seenChassis.has(chassis)) continue;
+        seenChassis.add(chassis);
         const modelCode = clean(pickField(row, 'Model Code'));
         const variant   = clean(pickField(row, 'Grade Description', 'Grades'));
         const group     = modelGroupOf(modelCode, variant) || clean(row.MODEL);
@@ -282,7 +288,8 @@ async function main() {
         if (modelCode && !modelSet.has(modelCode)) {
             modelSet.set(modelCode, { model_desc: variant, model_group: group });
         }
-        await insertWs.run({
+        if (!dealerCode) continue;
+        wsBatch.push({
             chassis,
             commission_number: clean(pickField(row, 'Commission Number')) || null,
             dealer_code: dealerCode,
@@ -303,26 +310,27 @@ async function main() {
             rsm: clean(row.RSM) || null
         });
     }
+    console.log('   flushing wholesale_sale (bulk)…');
+    await db.bulkInsert('wholesale_sale', WS_COLS, wsBatch, { onConflict: 'ignore', conflictKey: 'chassis' });
 
     // ---------- Models ----------
-    const insertModel = db.prepare(insertSql('model', ['model_code','model_desc','model_group'],
-                                              { onConflict: 'ignore', conflictKey: 'model_code' }));
-    for (const [k, v] of modelSet) {
-        await insertModel.run({ model_code: k, model_desc: v.model_desc, model_group: v.model_group });
-    }
+    const modelBatch = [...modelSet].map(([k, v]) =>
+        ({ model_code: k, model_desc: v.model_desc, model_group: v.model_group }));
+    await db.bulkInsert('model', ['model_code','model_desc','model_group'], modelBatch,
+        { onConflict: 'ignore', conflictKey: 'model_code' });
     console.log('   models:', modelSet.size);
 
     // ---------- Schemes + claim lines + ISAC ----------
     console.log('▶ ingesting 11 scheme workbooks');
-    const insertScheme = db.prepare(insertSql('scheme',
-        ['scheme_code','scheme_name','scheme_kind','scheme_type','period_yyyymm','target_payout','description']));
-    const insertClaim  = db.prepare(insertSql('scheme_claim_line',
-        ['scheme_code','vin','dealer_code','dealer_short_name','model_code','model_group',
-         'calculated_amount','eligibility','remarks','period_yyyymm']));
-    const insertIsac   = db.prepare(insertSql('isac_payment_line',
-        ['rfa_no','rfa_line_item','scheme_code','vin','dealer_code_isac','dealer_code',
-         'dealer_name','model_code','amount_payable','gl_account','gl_account_desc',
-         'ref_doc_no','ref_doc_date','hsn_code','tax','description','period_yyyymm','source_sheet']));
+    const SCHEME_COLS = ['scheme_code','scheme_name','scheme_kind','scheme_type','period_yyyymm','target_payout','description'];
+    const CLAIM_COLS  = ['scheme_code','vin','dealer_code','dealer_short_name','model_code','model_group',
+                         'calculated_amount','eligibility','remarks','period_yyyymm'];
+    const ISAC_COLS   = ['rfa_no','rfa_line_item','scheme_code','vin','dealer_code_isac','dealer_code',
+                         'dealer_name','model_code','amount_payable','gl_account','gl_account_desc',
+                         'ref_doc_no','ref_doc_date','hsn_code','tax','description','period_yyyymm','source_sheet'];
+    const schemeBatch = [];
+    const claimBatch  = [];
+    const isacBatch   = [];
 
     function readControlTotal(wb) {
         if (!wb || !wb.Sheets['Control Sheet']) return null;
@@ -354,7 +362,7 @@ async function main() {
         return null;
     }
 
-    async function ingestIsacSheet(wb, sheetName, sourceTag, schemeCode) {
+    function collectIsacSheet(wb, sheetName, sourceTag, schemeCode) {
         const rows = readSheet(wb, sheetName);
         let n = 0;
         for (const r of rows) {
@@ -364,9 +372,9 @@ async function main() {
             const rawDealer = pickField(r, 'Dealer code', 'Dealer Code');
             const dealerIsac = clean(rawDealer);
             const dealerNorm = normalizeDealerCode(rawDealer);
-            await insertIsac.run({
-                rfa_no: clean(pickField(r, 'RFA no.', 'RFA No.')),
-                rfa_line_item: clean(pickField(r, 'RFA Line Item Number')),
+            isacBatch.push({
+                rfa_no: clean(pickField(r, 'RFA no.', 'RFA No.')) || null,
+                rfa_line_item: clean(pickField(r, 'RFA Line Item Number')) || null,
                 scheme_code: schemeCode,
                 vin: vin || null,
                 dealer_code_isac: dealerIsac || null,
@@ -393,7 +401,7 @@ async function main() {
         const wb = safeXlsx(path.join(FILES_DIR, s.file));
         if (!wb) continue;
         const target = readControlTotal(wb);
-        await insertScheme.run({
+        schemeBatch.push({
             scheme_code: s.code, scheme_name: s.name,
             scheme_kind: s.kind, scheme_type: s.type,
             period_yyyymm: '2026-03', target_payout: target || 0,
@@ -423,7 +431,7 @@ async function main() {
             } else if (amt > 0) {
                 eligibility = 'YES';
             }
-            await insertClaim.run({
+            claimBatch.push({
                 scheme_code: s.code, vin: vin || null,
                 dealer_code: dealerCode, dealer_short_name: short || null,
                 model_code: modelCode || null, model_group: group,
@@ -434,20 +442,23 @@ async function main() {
         }
 
         let isacCount = 0;
-        isacCount += await ingestIsacSheet(wb, "ISAC-Till 21st Sep'25", 'PRE_22SEP', s.code);
-        isacCount += await ingestIsacSheet(wb, "ISAC-From 22nd Sep'25", 'POST_22SEP', s.code);
-        isacCount += await ingestIsacSheet(wb, 'ISAC 1 EInvoice', 'ISAC1_EINVOICE', s.code);
-        isacCount += await ingestIsacSheet(wb, 'ISAC 2 Non-EInvoice', 'ISAC2_NON', s.code);
+        isacCount += collectIsacSheet(wb, "ISAC-Till 21st Sep'25", 'PRE_22SEP', s.code);
+        isacCount += collectIsacSheet(wb, "ISAC-From 22nd Sep'25", 'POST_22SEP', s.code);
+        isacCount += collectIsacSheet(wb, 'ISAC 1 EInvoice', 'ISAC1_EINVOICE', s.code);
+        isacCount += collectIsacSheet(wb, 'ISAC 2 Non-EInvoice', 'ISAC2_NON', s.code);
 
         console.log(`    ${s.code} — ${s.name}  target=${target || 0}  claims=${claimCount}  isac=${isacCount}`);
     }
 
+    console.log('   flushing scheme / scheme_claim_line / isac_payment_line (bulk)…');
+    await db.bulkInsert('scheme', SCHEME_COLS, schemeBatch);
+    await db.bulkInsert('scheme_claim_line', CLAIM_COLS, claimBatch);
+    await db.bulkInsert('isac_payment_line', ISAC_COLS, isacBatch);
+
     // ---------- Dealer master ----------
     console.log('▶ persisting dealers');
-    const insertDealer = db.prepare(insertSql('dealer',
-        ['dealer_code','dealer_code_isac','dealer_short_name','dealer_name','dealer_company',
-         'rsm','zone','state','city','outlet'],
-        { onConflict: 'replace', conflictKey: 'dealer_code' }));
+    const DEALER_COLS = ['dealer_code','dealer_code_isac','dealer_short_name','dealer_name','dealer_company',
+                         'rsm','zone','state','city','outlet'];
 
     const isacDealers = await db.prepare(`
         SELECT DISTINCT dealer_code, dealer_code_isac, dealer_name
@@ -469,41 +480,40 @@ async function main() {
         }
     });
 
-    for (const d of dealerMap.values()) {
-        await insertDealer.run({
-            dealer_code:       d.dealer_code,
-            dealer_code_isac:  d.dealer_code_isac || null,
-            dealer_short_name: d.dealer_short_name || null,
-            dealer_name:       d.dealer_name || null,
-            dealer_company:    d.dealer_company || null,
-            rsm:               d.rsm || null,
-            zone:              d.zone || null,
-            state:             d.state || null,
-            city:              d.city || null,
-            outlet:            d.outlet || null
-        });
-    }
+    const dealerBatch = [...dealerMap.values()].map(d => ({
+        dealer_code:       d.dealer_code,
+        dealer_code_isac:  d.dealer_code_isac || null,
+        dealer_short_name: d.dealer_short_name || null,
+        dealer_name:       d.dealer_name || null,
+        dealer_company:    d.dealer_company || null,
+        rsm:               d.rsm || null,
+        zone:              d.zone || null,
+        state:             d.state || null,
+        city:              d.city || null,
+        outlet:            d.outlet || null
+    }));
+    await db.bulkInsert('dealer', DEALER_COLS, dealerBatch,
+        { onConflict: 'replace', conflictKey: 'dealer_code' });
 
     // ---------- Targets ----------
     console.log('▶ dealer targets (Book2 → 2026-03)');
-    const insertTarget = db.prepare(insertSql('dealer_month_target',
-        ['dealer_code','period_yyyymm','retail_target','wholesale_target'],
-        { onConflict: 'replace', conflictKey: 'dealer_code, period_yyyymm' }));
+    const TARGET_COLS = ['dealer_code','period_yyyymm','retail_target','wholesale_target'];
     const shortToCode = new Map();
     dealerMap.forEach(d => {
         if (d.dealer_short_name) shortToCode.set(norm(d.dealer_short_name), d.dealer_code);
     });
-    let tCount = 0;
+    const targetBatch = [];
     for (const t of targets) {
         const code = shortToCode.get(norm(t.short));
         if (!code) continue;
-        await insertTarget.run({
+        targetBatch.push({
             dealer_code: code, period_yyyymm: '2026-03',
             retail_target: t.rtl, wholesale_target: t.ws
         });
-        tCount++;
     }
-    console.log('   targets applied:', tCount);
+    await db.bulkInsert('dealer_month_target', TARGET_COLS, targetBatch,
+        { onConflict: 'replace', conflictKey: 'dealer_code, period_yyyymm' });
+    console.log('   targets applied:', targetBatch.length);
 
     // ---------- Summary ----------
     const cnt = async table => Number((await db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get()).c);
