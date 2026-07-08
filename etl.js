@@ -1,14 +1,12 @@
 /**
- * ETL: rebuild reports.sqlite3 from files/*.xlsx (real Skoda data).
+ * ETL: rebuild the reporting DB from files/*.xlsx (real Skoda data).
  *
- * Pipeline
- *   Book2.xlsx                          -> dealer_month_target seed + dealer names
- *   Retail March 2026 / Retail Dump     -> retail_sale (6,440 delivered VINs) + dealer master
- *   SKSL2026M03_575 / Wholesale Mar'26  -> wholesale_sale (7,937 invoiced VINs)
- *   All 11 scheme workbooks             -> scheme + scheme_claim_line (per-VIN calc)
- *   Every ISAC-* sheet inside each      -> isac_payment_line (what was actually paid)
+ * Target DB:
+ *   - If DATABASE_URL is set → Postgres (uses schema.pg.sql).
+ *   - Otherwise            → SQLite file at data/reports.sqlite3 (uses schema.sql).
  *
  * Run:  node etl.js
+ *   or: DATABASE_URL=postgres://... node etl.js
  */
 const fs = require('fs');
 const path = require('path');
@@ -16,8 +14,9 @@ const XLSX = require('xlsx');
 const { open } = require('./db');
 
 const FILES_DIR = path.join(__dirname, 'files');
-const DB_PATH = path.join(__dirname, 'data', 'reports.sqlite3');
-const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
+const SQLITE_PATH = path.join(__dirname, 'data', 'reports.sqlite3');
+const DIALECT = process.env.DATABASE_URL ? 'pg' : 'sqlite';
+const SCHEMA_PATH = path.join(__dirname, DIALECT === 'pg' ? 'schema.pg.sql' : 'schema.sql');
 
 // ─── xlsx helpers ────────────────────────────────────────────────────────
 const excelDateToIso = v => {
@@ -58,14 +57,11 @@ function readSheet(wb, name) {
             headerIdx = i; break;
         }
     }
-    // Build rows by hand from raw[] to avoid sheet_to_json's `range` mismatching
-    // when the sheet's !ref doesn't start at A1 (e.g. some ISAC sheets).
     const header = (raw[headerIdx] || []).map(k =>
         String(k).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim());
     const out = [];
     for (let r = headerIdx + 1; r < raw.length; r++) {
         const row = raw[r] || [];
-        // skip completely empty rows
         if (row.every(v => v === '' || v == null)) continue;
         const obj = {};
         for (let c = 0; c < header.length; c++) {
@@ -82,7 +78,6 @@ function pickField(row, ...names) {
     }
     return null;
 }
-// Fallback: substring match on the header (case-insensitive, ignoring parens/punct)
 function pickFieldLoose(row, ...needles) {
     const keys = Object.keys(row);
     for (const needle of needles) {
@@ -98,30 +93,53 @@ function normalizeDealerCode(rawCode) {
     if (rawCode == null) return null;
     let c = String(rawCode).trim();
     if (!c) return null;
-    // ISAC form 93810296 → 10296 ; retail short with '01A' suffix → keep base
     c = c.replace(/^938/, '');
     c = c.replace(/[^0-9A-Z]/gi, '');
     return c || null;
 }
 
-// ─── scheme catalogue (workbook → scheme metadata) ───────────────────────
+// ─── dialect-aware INSERT builder ────────────────────────────────────────
+// SQLite: INSERT OR IGNORE / INSERT OR REPLACE
+// Postgres: INSERT ... ON CONFLICT DO NOTHING / DO UPDATE
+function insertSql(table, cols, opts = {}) {
+    const colList = cols.join(', ');
+    const paramList = cols.map(c => '@' + c).join(', ');
+    if (DIALECT === 'pg') {
+        if (opts.onConflict === 'ignore') {
+            const conflict = opts.conflictKey || cols[0];
+            return `INSERT INTO ${table} (${colList}) VALUES (${paramList}) ON CONFLICT (${conflict}) DO NOTHING`;
+        }
+        if (opts.onConflict === 'replace') {
+            const conflict = opts.conflictKey || cols[0];
+            // Support composite keys like "dealer_code, period_yyyymm"
+            const keyCols = new Set(conflict.split(',').map(s => s.trim()));
+            const updates = cols.filter(c => !keyCols.has(c))
+                                 .map(c => `${c} = EXCLUDED.${c}`).join(', ');
+            return `INSERT INTO ${table} (${colList}) VALUES (${paramList}) ON CONFLICT (${conflict}) DO UPDATE SET ${updates}`;
+        }
+        return `INSERT INTO ${table} (${colList}) VALUES (${paramList})`;
+    }
+    // sqlite
+    if (opts.onConflict === 'ignore')  return `INSERT OR IGNORE  INTO ${table} (${colList}) VALUES (${paramList})`;
+    if (opts.onConflict === 'replace') return `INSERT OR REPLACE INTO ${table} (${colList}) VALUES (${paramList})`;
+    return `INSERT INTO ${table} (${colList}) VALUES (${paramList})`;
+}
+
+// ─── scheme catalogue ────────────────────────────────────────────────────
 const SCHEMES = [
-    { code: 'SKSL2026M03_555', name: 'DAN Support (Retail Tactical, per delivery)',      kind: 'RETAIL',    type: 'DAN',              file: 'SKSL2026M03_555.xlsx',                                                    data_sheet: "March'26 DAN Support", vin_col: 'Chassis Number',     amount_col: 'Retail Tactical Amount to be given', dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_565', name: 'Demo Vehicle Support',                             kind: 'RETAIL',    type: 'DEMO',             file: 'SKSL2026M03_565.xlsx',                                                    data_sheet: "Demo Support - Mar'26", vin_col: 'Chassis Number',    amount_col: 'Demo Support to be given',           dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_575', name: 'Integrated Volume Bonus (Retail + Wholesale slab)',kind: 'WHOLESALE', type: 'VOLUME_BONUS',     file: 'SKSL2026M03_575.xlsx',                                                    data_sheet: "Wholesale Mar'26",     vin_col: 'Chassis Number',   amount_col: 'Volume Bonus',                       dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_576', name: 'Early Bird / Stock Support Incentive',              kind: 'WHOLESALE', type: 'EARLY_BIRD',       file: 'SKSL2026M03_576.xlsx',                                                    data_sheet: "Wholesale Mar'26",     vin_col: 'Chassis Number',   amount_col: 'Stock Support Incentive',            dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_581', name: 'Sales Consultant Incentive',                        kind: 'RETAIL',    type: 'SC_INCENTIVE',     file: 'SC Incentive_SKSL2026M03_581.xlsx',                                       data_sheet: 'SC Incentive RB01 Add 2', vin_col: 'VIN',            amount_col: 'SC Incentive Amount',                dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_582', name: 'Kushaq Metal-Out Regional Booster',                 kind: 'RETAIL',    type: 'REGIONAL_BOOSTER', file: 'Kushaq Metal out action - Regional Booster_SKSL2026M03_582.xlsx',         data_sheet: 'Base File',            vin_col: 'VIN',              amount_col: 'Kushaq Metal out Action Regional Booster', dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_583', name: 'Kylaq Classic MT Regional Booster',                 kind: 'RETAIL',    type: 'REGIONAL_BOOSTER', file: 'Kylaq Classic MT Regional Booster_SKSL2026M03_583.xlsx',                  data_sheet: 'Base File',            vin_col: 'VIN',              amount_col: 'Kylaq Classic MT Regional Booster',  dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_585', name: 'Wholesale Kodiaq Booster',                          kind: 'WHOLESALE', type: 'KODIAQ_BOOSTER',   file: 'Wholesale Kodiaq Booster_SKSL2026M03_585.xlsx',                           data_sheet: "Wholesale Mar'26",     vin_col: 'Chassis Number',   amount_col: 'Kodiaq Booster',                     dealer_col: 'Dealer Code' },
-    { code: 'SKSL2026M03_612', name: 'Loyalty Bonus (Repeat-Customer Support)',           kind: 'RETAIL',    type: 'LOYALTY',          file: 'SKSL2026M03_612.xlsx',                                                    data_sheet: 'Loyalty Payout',       vin_col: 'Chassis Number',   amount_col: 'SAIPL Contri (Inc GST)',             dealer_col: 'Retail Dealer Code' },
-    { code: 'SKSL2026M03_614', name: 'Corporate Customer Support',                        kind: 'RETAIL',    type: 'CORPORATE',        file: 'SKSL2026M03_614.xlsx',                                                    data_sheet: 'Coporate Payout',      vin_col: 'Chassis Number',   amount_col: 'Actual Amount as on CDD',            dealer_col: 'Retail Dealer Code' },
-    { code: 'SKSL2026M03_615', name: 'Exchange / Scrappage Bonus',                        kind: 'RETAIL',    type: 'EXCHANGE',         file: 'SKSL2026M03_615.xlsx',                                                    data_sheet: 'Exchange Payout',      vin_col: 'Chassis Number',   amount_col: 'SAIPL Contri',                       dealer_col: 'Retail Dealer Code' }
+    { code: 'SKSL2026M03_555', name: 'DAN Support (Retail Tactical, per delivery)',       kind: 'RETAIL',    type: 'DAN',              file: 'SKSL2026M03_555.xlsx',                                              data_sheet: "March'26 DAN Support", vin_col: 'Chassis Number', amount_col: 'Retail Tactical Amount to be given', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_565', name: 'Demo Vehicle Support',                              kind: 'RETAIL',    type: 'DEMO',             file: 'SKSL2026M03_565.xlsx',                                              data_sheet: "Demo Support - Mar'26", vin_col: 'Chassis Number', amount_col: 'Demo Support to be given', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_575', name: 'Integrated Volume Bonus (Retail + Wholesale slab)', kind: 'WHOLESALE', type: 'VOLUME_BONUS',     file: 'SKSL2026M03_575.xlsx',                                              data_sheet: "Wholesale Mar'26", vin_col: 'Chassis Number', amount_col: 'Volume Bonus', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_576', name: 'Early Bird / Stock Support Incentive',              kind: 'WHOLESALE', type: 'EARLY_BIRD',       file: 'SKSL2026M03_576.xlsx',                                              data_sheet: "Wholesale Mar'26", vin_col: 'Chassis Number', amount_col: 'Stock Support Incentive', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_581', name: 'Sales Consultant Incentive',                        kind: 'RETAIL',    type: 'SC_INCENTIVE',     file: 'SC Incentive_SKSL2026M03_581.xlsx',                                 data_sheet: 'SC Incentive RB01 Add 2', vin_col: 'VIN', amount_col: 'SC Incentive Amount', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_582', name: 'Kushaq Metal-Out Regional Booster',                 kind: 'RETAIL',    type: 'REGIONAL_BOOSTER', file: 'Kushaq Metal out action - Regional Booster_SKSL2026M03_582.xlsx',   data_sheet: 'Base File', vin_col: 'VIN', amount_col: 'Kushaq Metal out Action Regional Booster', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_583', name: 'Kylaq Classic MT Regional Booster',                 kind: 'RETAIL',    type: 'REGIONAL_BOOSTER', file: 'Kylaq Classic MT Regional Booster_SKSL2026M03_583.xlsx',            data_sheet: 'Base File', vin_col: 'VIN', amount_col: 'Kylaq Classic MT Regional Booster', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_585', name: 'Wholesale Kodiaq Booster',                          kind: 'WHOLESALE', type: 'KODIAQ_BOOSTER',   file: 'Wholesale Kodiaq Booster_SKSL2026M03_585.xlsx',                     data_sheet: "Wholesale Mar'26", vin_col: 'Chassis Number', amount_col: 'Kodiaq Booster', dealer_col: 'Dealer Code' },
+    { code: 'SKSL2026M03_612', name: 'Loyalty Bonus (Repeat-Customer Support)',           kind: 'RETAIL',    type: 'LOYALTY',          file: 'SKSL2026M03_612.xlsx',                                              data_sheet: 'Loyalty Payout', vin_col: 'Chassis Number', amount_col: 'SAIPL Contri (Inc GST)', dealer_col: 'Retail Dealer Code' },
+    { code: 'SKSL2026M03_614', name: 'Corporate Customer Support',                        kind: 'RETAIL',    type: 'CORPORATE',        file: 'SKSL2026M03_614.xlsx',                                              data_sheet: 'Coporate Payout', vin_col: 'Chassis Number', amount_col: 'Actual Amount as on CDD', dealer_col: 'Retail Dealer Code' },
+    { code: 'SKSL2026M03_615', name: 'Exchange / Scrappage Bonus',                        kind: 'RETAIL',    type: 'EXCHANGE',         file: 'SKSL2026M03_615.xlsx',                                              data_sheet: 'Exchange Payout', vin_col: 'Chassis Number', amount_col: 'SAIPL Contri', dealer_col: 'Retail Dealer Code' }
 ];
 
-const CTRL_TOTAL_HINTS = ['payout data', 'as per calculation', 'total', 'amount as per'];
-
-// ─── model group inference from Model Code / Model Desc ──────────────────
 function modelGroupOf(modelCode, modelDesc) {
     const c = clean(modelCode).toUpperCase();
     const d = clean(modelDesc).toUpperCase();
@@ -136,18 +154,22 @@ function modelGroupOf(modelCode, modelDesc) {
 
 // ─── main ────────────────────────────────────────────────────────────────
 async function main() {
-    if (fs.existsSync(DB_PATH)) fs.unlinkSync(DB_PATH);
-    const db = await open(DB_PATH);
-    db.exec(fs.readFileSync(SCHEMA_PATH, 'utf8'));
+    if (DIALECT === 'sqlite' && fs.existsSync(SQLITE_PATH)) fs.unlinkSync(SQLITE_PATH);
+    const db = await open(SQLITE_PATH);
+    console.log(`▶ using ${DIALECT} dialect (schema: ${path.basename(SCHEMA_PATH)})`);
+    await db.exec(fs.readFileSync(SCHEMA_PATH, 'utf8'));
 
-    // ---------- Dealer master (built lazily from retail + wholesale) ----------
-    const dealerMap = new Map(); // dealer_code -> row
+    if (!fs.existsSync(FILES_DIR)) {
+        console.log('files/ folder missing — schema created, no data ingested');
+        await db.close();
+        return;
+    }
 
+    const dealerMap = new Map();
     function upsertDealer(fields) {
         const code = normalizeDealerCode(fields.dealer_code);
         if (!code) return null;
         const existing = dealerMap.get(code) || { dealer_code: code };
-        // fill only if not already present
         ['dealer_code_isac', 'dealer_short_name', 'dealer_name', 'dealer_company',
          'rsm', 'zone', 'state', 'city', 'outlet'].forEach(k => {
             if (!existing[k] && fields[k]) existing[k] = fields[k];
@@ -156,188 +178,155 @@ async function main() {
         return existing;
     }
 
-    // ---------- Book2.xlsx  → targets + short-name seeds ----------
+    // ---------- Book2 ----------
     console.log('▶ Book2.xlsx (dealer targets)');
     const book2 = safeXlsx(path.join(FILES_DIR, 'Book2.xlsx'));
-    const targets = []; // {dealer_short_name, zone, state, rtl, ws}
+    const targets = [];
     if (book2) {
         const rows = XLSX.utils.sheet_to_json(book2.Sheets['Sheet1'] || book2.Sheets[book2.SheetNames[0]], { defval: '' });
         rows.forEach(r => {
             const shortName = clean(r['Actual Dealer'] || r.Dealer);
             if (!shortName) return;
             targets.push({
-                short: shortName,
-                state: clean(r.State),
+                short: shortName, state: clean(r.State),
                 zone: clean(r.Zone || 'India-I'),
-                rtl: num(r['RTL TGTS']),
-                ws:  num(r['WS tgts'])
+                rtl: num(r['RTL TGTS']), ws: num(r['WS tgts'])
             });
         });
         console.log('   targets rows:', targets.length);
     }
     const targetByShort = new Map(targets.map(t => [norm(t.short), t]));
 
-    // ---------- Retail March 2026  → retail_sale + dealer names ----------
+    // ---------- Retail ----------
     console.log('▶ Retail March 2026.xlsx (retail_sale)');
     const retailWb = safeXlsx(path.join(FILES_DIR, 'Retail March 2026.xlsx'));
     const retailRows = retailWb ? readSheet(retailWb, 'Retail Dump') : [];
     console.log('   retail rows:', retailRows.length);
 
-    const insertRetail = db.prepare(`
-        INSERT OR IGNORE INTO retail_sale
-            (vin, record_id, dealer_code, dealer_short_name, ws_dealer_code, ws_date,
-             model_code, model_group, model_desc, variant, booking_date, delivery_date,
-             period_yyyymm, customer_state, zone, rsm)
-        VALUES (@vin,@record_id,@dealer_code,@dealer_short_name,@ws_dealer_code,@ws_date,
-                @model_code,@model_group,@model_desc,@variant,@booking_date,@delivery_date,
-                @period_yyyymm,@customer_state,@zone,@rsm)
-    `);
+    const RETAIL_COLS = ['vin','record_id','dealer_code','dealer_short_name','ws_dealer_code','ws_date',
+                         'model_code','model_group','model_desc','variant','booking_date','delivery_date',
+                         'period_yyyymm','customer_state','zone','rsm'];
+    const insertRetail = db.prepare(insertSql('retail_sale', RETAIL_COLS, { onConflict: 'ignore', conflictKey: 'vin' }));
+    const modelSet = new Map();
 
-    const modelSet = new Map(); // model_code -> {model_desc, model_group}
-
-    const retailTx = db.transaction(() => {
-        retailRows.forEach(row => {
-            const vin = clean(pickField(row, 'VIN', 'Chassis Number'));
-            if (!vin) return;
-            const modelCode = clean(pickField(row, 'Model Code1', 'Model Code'));
-            const modelDesc = clean(pickField(row, 'Model Desc', 'Model'));
-            const group     = modelGroupOf(modelCode, modelDesc) || clean(row['Model Group Names']);
-            const dealerCode = normalizeDealerCode(pickField(row, 'Dealer Code'));
-            const wsDealer   = normalizeDealerCode(pickField(row, 'Wholesale Dealer Code', 'WS Dealer Code'));
-            const shortName  = clean(pickField(row, 'Actual Dealer', 'Dealer Name'));
-            const deliveryDate = excelDateToIso(pickField(row, 'Delivery Date', 'First Delivery Date (Qualified Lead - Vehicle)', 'Delivery to Customer'));
-            upsertDealer({
-                dealer_code: dealerCode,
-                dealer_short_name: shortName,
-                dealer_name: clean(pickField(row, 'Dealer Name')),
-                rsm: clean(row.RSM),
-                zone: clean(row.ZONE) || clean(row.Zone),
-                state: clean(pickField(row, 'City/State (Registration)'))
-            });
-            if (modelCode) {
-                if (!modelSet.has(modelCode)) modelSet.set(modelCode, { model_desc: modelDesc, model_group: group });
-            }
-            insertRetail.run({
-                vin,
-                record_id: clean(pickField(row, 'Record Id', 'Record Id (Qualified Lead - Vehicle)')),
-                dealer_code: dealerCode,
-                dealer_short_name: shortName || null,
-                ws_dealer_code: wsDealer || null,
-                ws_date: excelDateToIso(pickField(row, 'Wholesale date', 'WS Date')),
-                model_code: modelCode || null,
-                model_group: group,
-                model_desc: modelDesc || null,
-                variant: clean(pickField(row, 'Final Grade Desc', 'Variant')) || null,
-                booking_date: excelDateToIso(row['Booking Date']),
-                delivery_date: deliveryDate,
-                period_yyyymm: periodOf(deliveryDate) || '2026-03',
-                customer_state: clean(pickField(row, 'City/State (Registration)')) || null,
-                zone: clean(pickField(row, 'ZONE', 'Zone')) || null,
-                rsm: clean(row.RSM) || null
-            });
+    for (const row of retailRows) {
+        const vin = clean(pickField(row, 'VIN', 'Chassis Number'));
+        if (!vin) continue;
+        const modelCode = clean(pickField(row, 'Model Code1', 'Model Code'));
+        const modelDesc = clean(pickField(row, 'Model Desc', 'Model'));
+        const group     = modelGroupOf(modelCode, modelDesc) || clean(row['Model Group Names']);
+        const dealerCode = normalizeDealerCode(pickField(row, 'Dealer Code'));
+        const wsDealer   = normalizeDealerCode(pickField(row, 'Wholesale Dealer Code', 'WS Dealer Code'));
+        const shortName  = clean(pickField(row, 'Actual Dealer', 'Dealer Name'));
+        const deliveryDate = excelDateToIso(pickField(row, 'Delivery Date', 'First Delivery Date (Qualified Lead - Vehicle)', 'Delivery to Customer'));
+        upsertDealer({
+            dealer_code: dealerCode,
+            dealer_short_name: shortName,
+            dealer_name: clean(pickField(row, 'Dealer Name')),
+            rsm: clean(row.RSM),
+            zone: clean(row.ZONE) || clean(row.Zone),
+            state: clean(pickField(row, 'City/State (Registration)'))
         });
-    });
-    retailTx();
+        if (modelCode && !modelSet.has(modelCode)) {
+            modelSet.set(modelCode, { model_desc: modelDesc, model_group: group });
+        }
+        await insertRetail.run({
+            vin,
+            record_id: clean(pickField(row, 'Record Id', 'Record Id (Qualified Lead - Vehicle)')),
+            dealer_code: dealerCode,
+            dealer_short_name: shortName || null,
+            ws_dealer_code: wsDealer || null,
+            ws_date: excelDateToIso(pickField(row, 'Wholesale date', 'WS Date')),
+            model_code: modelCode || null,
+            model_group: group,
+            model_desc: modelDesc || null,
+            variant: clean(pickField(row, 'Final Grade Desc', 'Variant')) || null,
+            booking_date: excelDateToIso(row['Booking Date']),
+            delivery_date: deliveryDate,
+            period_yyyymm: periodOf(deliveryDate) || '2026-03',
+            customer_state: clean(pickField(row, 'City/State (Registration)')) || null,
+            zone: clean(pickField(row, 'ZONE', 'Zone')) || null,
+            rsm: clean(row.RSM) || null
+        });
+    }
 
-    // ---------- Wholesale (use the 575 workbook — same base rows) ----------
+    // ---------- Wholesale ----------
     console.log('▶ SKSL2026M03_575.xlsx / Wholesale Mar\'26 (wholesale_sale)');
     const wsWb = safeXlsx(path.join(FILES_DIR, 'SKSL2026M03_575.xlsx'));
     const wsRows = wsWb ? readSheet(wsWb, "Wholesale Mar'26") : [];
     console.log('   wholesale rows:', wsRows.length);
 
-    const insertWs = db.prepare(`
-        INSERT OR IGNORE INTO wholesale_sale
-            (chassis, commission_number, dealer_code, dealer_short_name, model_code, model_group,
-             variant, invoice_number, invoice_date, invoice_amount, ws_date, period_yyyymm,
-             basic_price, dealer_price, tax_amount, state_code, zone, rsm)
-        VALUES (@chassis,@commission_number,@dealer_code,@dealer_short_name,@model_code,@model_group,
-                @variant,@invoice_number,@invoice_date,@invoice_amount,@ws_date,@period_yyyymm,
-                @basic_price,@dealer_price,@tax_amount,@state_code,@zone,@rsm)
-    `);
-    const wsTx = db.transaction(() => {
-        wsRows.forEach(row => {
-            const chassis = clean(pickField(row, 'Chassis Number'));
-            if (!chassis) return;
-            const modelCode = clean(pickField(row, 'Model Code'));
-            const variant   = clean(pickField(row, 'Grade Description', 'Grades'));
-            const group     = modelGroupOf(modelCode, variant) || clean(row.MODEL);
-            const dealerCode = normalizeDealerCode(pickField(row, 'Dealer Code'));
-            const shortName  = clean(pickField(row, 'Actual Dealer', 'DEALER'));
-            const wsDate = excelDateToIso(pickField(row, 'Wholesale Date', 'Payment: Dealer Invoice Date'));
-            upsertDealer({
-                dealer_code: dealerCode,
-                dealer_short_name: shortName,
-                dealer_name: clean(pickField(row, 'Dealer: Company Name', 'Selling Dealer')),
-                dealer_company: clean(pickField(row, 'Dealer: Company Name')),
-                rsm: clean(row.RSM),
-                zone: clean(pickField(row, 'ZONE')),
-                city: clean(pickField(row, 'Dealer: Location'))
-            });
-            if (modelCode && !modelSet.has(modelCode)) {
-                modelSet.set(modelCode, { model_desc: variant, model_group: group });
-            }
-            insertWs.run({
-                chassis,
-                commission_number: clean(pickField(row, 'Commission Number')) || null,
-                dealer_code: dealerCode,
-                dealer_short_name: shortName || null,
-                model_code: modelCode || null,
-                model_group: group,
-                variant: variant || null,
-                invoice_number: clean(pickField(row, 'Payment: Dealer Invoice Number')) || null,
-                invoice_date: excelDateToIso(pickField(row, 'Payment: Dealer Invoice Date')),
-                invoice_amount: num(pickField(row, 'Payment: Dealer Invoice Amount')),
-                ws_date: wsDate,
-                period_yyyymm: periodOf(wsDate) || '2026-03',
-                basic_price: num(pickField(row, 'Vehicle Basic Price')),
-                dealer_price: num(pickField(row, 'Dealer Price')),
-                tax_amount: num(pickField(row, 'Vehicle Tax Amount')),
-                state_code: clean(pickField(row, 'State Code')) || null,
-                zone: clean(pickField(row, 'ZONE')) || null,
-                rsm: clean(row.RSM) || null
-            });
-        });
-    });
-    wsTx();
+    const WS_COLS = ['chassis','commission_number','dealer_code','dealer_short_name','model_code','model_group',
+                     'variant','invoice_number','invoice_date','invoice_amount','ws_date','period_yyyymm',
+                     'basic_price','dealer_price','tax_amount','state_code','zone','rsm'];
+    const insertWs = db.prepare(insertSql('wholesale_sale', WS_COLS, { onConflict: 'ignore', conflictKey: 'chassis' }));
 
-    // ---------- Persist models ----------
-    const insertModel = db.prepare(`
-        INSERT OR IGNORE INTO model (model_code, model_desc, model_group)
-        VALUES (?, ?, ?)
-    `);
-    modelSet.forEach((v, k) => insertModel.run(k, v.model_desc, v.model_group));
+    for (const row of wsRows) {
+        const chassis = clean(pickField(row, 'Chassis Number'));
+        if (!chassis) continue;
+        const modelCode = clean(pickField(row, 'Model Code'));
+        const variant   = clean(pickField(row, 'Grade Description', 'Grades'));
+        const group     = modelGroupOf(modelCode, variant) || clean(row.MODEL);
+        const dealerCode = normalizeDealerCode(pickField(row, 'Dealer Code'));
+        const shortName  = clean(pickField(row, 'Actual Dealer', 'DEALER'));
+        const wsDate = excelDateToIso(pickField(row, 'Wholesale Date', 'Payment: Dealer Invoice Date'));
+        upsertDealer({
+            dealer_code: dealerCode,
+            dealer_short_name: shortName,
+            dealer_name: clean(pickField(row, 'Dealer: Company Name', 'Selling Dealer')),
+            dealer_company: clean(pickField(row, 'Dealer: Company Name')),
+            rsm: clean(row.RSM),
+            zone: clean(pickField(row, 'ZONE')),
+            city: clean(pickField(row, 'Dealer: Location'))
+        });
+        if (modelCode && !modelSet.has(modelCode)) {
+            modelSet.set(modelCode, { model_desc: variant, model_group: group });
+        }
+        await insertWs.run({
+            chassis,
+            commission_number: clean(pickField(row, 'Commission Number')) || null,
+            dealer_code: dealerCode,
+            dealer_short_name: shortName || null,
+            model_code: modelCode || null,
+            model_group: group,
+            variant: variant || null,
+            invoice_number: clean(pickField(row, 'Payment: Dealer Invoice Number')) || null,
+            invoice_date: excelDateToIso(pickField(row, 'Payment: Dealer Invoice Date')),
+            invoice_amount: num(pickField(row, 'Payment: Dealer Invoice Amount')),
+            ws_date: wsDate,
+            period_yyyymm: periodOf(wsDate) || '2026-03',
+            basic_price: num(pickField(row, 'Vehicle Basic Price')),
+            dealer_price: num(pickField(row, 'Dealer Price')),
+            tax_amount: num(pickField(row, 'Vehicle Tax Amount')),
+            state_code: clean(pickField(row, 'State Code')) || null,
+            zone: clean(pickField(row, 'ZONE')) || null,
+            rsm: clean(row.RSM) || null
+        });
+    }
+
+    // ---------- Models ----------
+    const insertModel = db.prepare(insertSql('model', ['model_code','model_desc','model_group'],
+                                              { onConflict: 'ignore', conflictKey: 'model_code' }));
+    for (const [k, v] of modelSet) {
+        await insertModel.run({ model_code: k, model_desc: v.model_desc, model_group: v.model_group });
+    }
     console.log('   models:', modelSet.size);
 
-    // ---------- Schemes + claim lines + ISAC payments ----------
+    // ---------- Schemes + claim lines + ISAC ----------
     console.log('▶ ingesting 11 scheme workbooks');
-    const insertScheme = db.prepare(`
-        INSERT INTO scheme (scheme_code, scheme_name, scheme_kind, scheme_type,
-                            period_yyyymm, target_payout, description)
-        VALUES (@scheme_code,@scheme_name,@scheme_kind,@scheme_type,
-                @period_yyyymm,@target_payout,@description)
-    `);
-    const insertClaim = db.prepare(`
-        INSERT INTO scheme_claim_line
-            (scheme_code, vin, dealer_code, dealer_short_name, model_code, model_group,
-             calculated_amount, eligibility, remarks, period_yyyymm)
-        VALUES (@scheme_code,@vin,@dealer_code,@dealer_short_name,@model_code,@model_group,
-                @calculated_amount,@eligibility,@remarks,@period_yyyymm)
-    `);
-    const insertIsac = db.prepare(`
-        INSERT INTO isac_payment_line
-            (rfa_no, rfa_line_item, scheme_code, vin, dealer_code_isac, dealer_code,
-             dealer_name, model_code, amount_payable, gl_account, gl_account_desc,
-             ref_doc_no, ref_doc_date, hsn_code, tax, description, period_yyyymm, source_sheet)
-        VALUES (@rfa_no,@rfa_line_item,@scheme_code,@vin,@dealer_code_isac,@dealer_code,
-                @dealer_name,@model_code,@amount_payable,@gl_account,@gl_account_desc,
-                @ref_doc_no,@ref_doc_date,@hsn_code,@tax,@description,@period_yyyymm,@source_sheet)
-    `);
+    const insertScheme = db.prepare(insertSql('scheme',
+        ['scheme_code','scheme_name','scheme_kind','scheme_type','period_yyyymm','target_payout','description']));
+    const insertClaim  = db.prepare(insertSql('scheme_claim_line',
+        ['scheme_code','vin','dealer_code','dealer_short_name','model_code','model_group',
+         'calculated_amount','eligibility','remarks','period_yyyymm']));
+    const insertIsac   = db.prepare(insertSql('isac_payment_line',
+        ['rfa_no','rfa_line_item','scheme_code','vin','dealer_code_isac','dealer_code',
+         'dealer_name','model_code','amount_payable','gl_account','gl_account_desc',
+         'ref_doc_no','ref_doc_date','hsn_code','tax','description','period_yyyymm','source_sheet']));
 
     function readControlTotal(wb) {
         if (!wb || !wb.Sheets['Control Sheet']) return null;
         const rows = XLSX.utils.sheet_to_json(wb.Sheets['Control Sheet'], { header: 1, defval: '' });
-        // Find the FIRST row containing an "amount as per calculation" style label
-        // in ANY column, then take the first numeric value in that row.
         for (const row of rows) {
             let labelCol = -1;
             for (let c = 0; c < row.length; c++) {
@@ -351,7 +340,6 @@ async function main() {
                 }
             }
         }
-        // Fallback: any row with 'payout data (total)'
         for (const row of rows) {
             for (let c = 0; c < row.length; c++) {
                 const label = String(row[c] || '').toLowerCase();
@@ -366,17 +354,17 @@ async function main() {
         return null;
     }
 
-    function ingestIsacSheet(wb, sheetName, sourceTag, schemeCode) {
+    async function ingestIsacSheet(wb, sheetName, sourceTag, schemeCode) {
         const rows = readSheet(wb, sheetName);
         let n = 0;
-        rows.forEach(r => {
+        for (const r of rows) {
             const vin = clean(pickFieldLoose(r, 'vin no', 'chassis'));
             const amt = num(pickFieldLoose(r, 'amount payable', 'amount to dealer'));
-            if (!vin && !amt) return;
+            if (!vin && !amt) continue;
             const rawDealer = pickField(r, 'Dealer code', 'Dealer Code');
             const dealerIsac = clean(rawDealer);
             const dealerNorm = normalizeDealerCode(rawDealer);
-            insertIsac.run({
+            await insertIsac.run({
                 rfa_no: clean(pickField(r, 'RFA no.', 'RFA No.')),
                 rfa_line_item: clean(pickField(r, 'RFA Line Item Number')),
                 scheme_code: schemeCode,
@@ -397,7 +385,7 @@ async function main() {
                 source_sheet: sourceTag
             });
             n++;
-        });
+        }
         return n;
     }
 
@@ -405,82 +393,63 @@ async function main() {
         const wb = safeXlsx(path.join(FILES_DIR, s.file));
         if (!wb) continue;
         const target = readControlTotal(wb);
-        insertScheme.run({
-            scheme_code: s.code,
-            scheme_name: s.name,
-            scheme_kind: s.kind,
-            scheme_type: s.type,
-            period_yyyymm: '2026-03',
-            target_payout: target || 0,
+        await insertScheme.run({
+            scheme_code: s.code, scheme_name: s.name,
+            scheme_kind: s.kind, scheme_type: s.type,
+            period_yyyymm: '2026-03', target_payout: target || 0,
             description: `Source: ${s.file}`
         });
 
-        // claim lines
         const rows = readSheet(wb, s.data_sheet);
         let claimCount = 0;
-        const claimTx = db.transaction(() => {
-            rows.forEach(r => {
-                const vin = clean(pickField(r, s.vin_col, 'VIN', 'Chassis Number'));
-                const amt = num(pickField(r, s.amount_col));
-                if (!vin && !amt) return;
-                const modelCode = clean(pickField(r, 'Model Code1', 'Model Code'));
-                const modelDesc = clean(pickField(r, 'Model Desc', 'Model'));
-                const group = modelGroupOf(modelCode, modelDesc) || clean(r['Model Group Names']);
-                const rawDealer = pickField(r, s.dealer_col, 'Dealer Code', 'Retail Dealer Code', 'Dealer code');
-                const dealerCode = normalizeDealerCode(rawDealer);
-                const short = clean(pickField(r, 'Actual Dealer', 'Dealer Name', 'Retail Dealer Name', 'WS Dealer Name'));
-                const remarks = clean(pickField(r, 'Remarks', 'Remark', 'Loyalty Claim Remarks (1st Lot)', 'Corporate Claim Remarks (1st Lot)', 'Exchange Claim Remarks (1st Lot)')) || null;
-                let eligibility = null;
-                const elig = clean(pickField(r, 'Eligible for DAN Support?', 'SC Incentive Eligibility', 'Early incentive Eligibility', 'Payout Eligiblity', 'Kodiaq Applicability', 'Loyalty Claim Status', 'Corporate Status', 'Exchange Claim Status'));
-                if (elig) {
-                    const u = elig.toUpperCase();
-                    if (u.includes('YES') || u.includes('ELIG') || u === 'Y' || u.includes('APPROVED') || u === 'PAID') eligibility = 'YES';
-                    else if (u.includes('NO') || u.includes('NOT') || u.includes('REJECT')) eligibility = 'NO';
-                    else eligibility = elig.slice(0, 40);
-                } else if (amt > 0) {
-                    eligibility = 'YES';
-                }
-                insertClaim.run({
-                    scheme_code: s.code,
-                    vin: vin || null,
-                    dealer_code: dealerCode,
-                    dealer_short_name: short || null,
-                    model_code: modelCode || null,
-                    model_group: group,
-                    calculated_amount: amt,
-                    eligibility,
-                    remarks,
-                    period_yyyymm: '2026-03'
-                });
-                claimCount++;
+        for (const r of rows) {
+            const vin = clean(pickField(r, s.vin_col, 'VIN', 'Chassis Number'));
+            const amt = num(pickField(r, s.amount_col));
+            if (!vin && !amt) continue;
+            const modelCode = clean(pickField(r, 'Model Code1', 'Model Code'));
+            const modelDesc = clean(pickField(r, 'Model Desc', 'Model'));
+            const group = modelGroupOf(modelCode, modelDesc) || clean(r['Model Group Names']);
+            const rawDealer = pickField(r, s.dealer_col, 'Dealer Code', 'Retail Dealer Code', 'Dealer code');
+            const dealerCode = normalizeDealerCode(rawDealer);
+            const short = clean(pickField(r, 'Actual Dealer', 'Dealer Name', 'Retail Dealer Name', 'WS Dealer Name'));
+            const remarks = clean(pickField(r, 'Remarks', 'Remark', 'Loyalty Claim Remarks (1st Lot)', 'Corporate Claim Remarks (1st Lot)', 'Exchange Claim Remarks (1st Lot)')) || null;
+            let eligibility = null;
+            const elig = clean(pickField(r, 'Eligible for DAN Support?', 'SC Incentive Eligibility', 'Early incentive Eligibility', 'Payout Eligiblity', 'Kodiaq Applicability', 'Loyalty Claim Status', 'Corporate Status', 'Exchange Claim Status'));
+            if (elig) {
+                const u = elig.toUpperCase();
+                if (u.includes('YES') || u.includes('ELIG') || u === 'Y' || u.includes('APPROVED') || u === 'PAID') eligibility = 'YES';
+                else if (u.includes('NO') || u.includes('NOT') || u.includes('REJECT')) eligibility = 'NO';
+                else eligibility = elig.slice(0, 40);
+            } else if (amt > 0) {
+                eligibility = 'YES';
+            }
+            await insertClaim.run({
+                scheme_code: s.code, vin: vin || null,
+                dealer_code: dealerCode, dealer_short_name: short || null,
+                model_code: modelCode || null, model_group: group,
+                calculated_amount: amt, eligibility, remarks,
+                period_yyyymm: '2026-03'
             });
-        });
-        claimTx();
+            claimCount++;
+        }
 
-        // ISAC (two sheets in most workbooks)
         let isacCount = 0;
-        const isacTx = db.transaction(() => {
-            isacCount += ingestIsacSheet(wb, "ISAC-Till 21st Sep'25", 'PRE_22SEP', s.code);
-            isacCount += ingestIsacSheet(wb, "ISAC-From 22nd Sep'25", 'POST_22SEP', s.code);
-            isacCount += ingestIsacSheet(wb, 'ISAC 1 EInvoice', 'ISAC1_EINVOICE', s.code);
-            isacCount += ingestIsacSheet(wb, 'ISAC 2 Non-EInvoice', 'ISAC2_NON', s.code);
-        });
-        isacTx();
+        isacCount += await ingestIsacSheet(wb, "ISAC-Till 21st Sep'25", 'PRE_22SEP', s.code);
+        isacCount += await ingestIsacSheet(wb, "ISAC-From 22nd Sep'25", 'POST_22SEP', s.code);
+        isacCount += await ingestIsacSheet(wb, 'ISAC 1 EInvoice', 'ISAC1_EINVOICE', s.code);
+        isacCount += await ingestIsacSheet(wb, 'ISAC 2 Non-EInvoice', 'ISAC2_NON', s.code);
 
         console.log(`    ${s.code} — ${s.name}  target=${target || 0}  claims=${claimCount}  isac=${isacCount}`);
     }
 
-    // ---------- Persist dealer master ----------
+    // ---------- Dealer master ----------
     console.log('▶ persisting dealers');
-    const insertDealer = db.prepare(`
-        INSERT OR REPLACE INTO dealer
-            (dealer_code, dealer_code_isac, dealer_short_name, dealer_name, dealer_company,
-             rsm, zone, state, city, outlet)
-        VALUES (@dealer_code,@dealer_code_isac,@dealer_short_name,@dealer_name,@dealer_company,
-                @rsm,@zone,@state,@city,@outlet)
-    `);
-    // Also pull dealer codes from ISAC (some dealers only appear on ISAC)
-    const isacDealers = db.prepare(`
+    const insertDealer = db.prepare(insertSql('dealer',
+        ['dealer_code','dealer_code_isac','dealer_short_name','dealer_name','dealer_company',
+         'rsm','zone','state','city','outlet'],
+        { onConflict: 'replace', conflictKey: 'dealer_code' }));
+
+    const isacDealers = await db.prepare(`
         SELECT DISTINCT dealer_code, dealer_code_isac, dealer_name
           FROM isac_payment_line
          WHERE dealer_code IS NOT NULL
@@ -491,7 +460,6 @@ async function main() {
         dealer_name: r.dealer_name
     }));
 
-    // Enrich with Book2 targets by short name match
     dealerMap.forEach(d => {
         if (!d.dealer_short_name) return;
         const t = targetByShort.get(norm(d.dealer_short_name));
@@ -501,8 +469,8 @@ async function main() {
         }
     });
 
-    const dealerTx = db.transaction(() => {
-        dealerMap.forEach(d => insertDealer.run({
+    for (const d of dealerMap.values()) {
+        await insertDealer.run({
             dealer_code:       d.dealer_code,
             dealer_code_isac:  d.dealer_code_isac || null,
             dealer_short_name: d.dealer_short_name || null,
@@ -513,44 +481,42 @@ async function main() {
             state:             d.state || null,
             city:              d.city || null,
             outlet:            d.outlet || null
-        }));
-    });
-    dealerTx();
+        });
+    }
 
-    // ---------- Dealer month targets (Book2 assumed for 2026-03) ----------
+    // ---------- Targets ----------
     console.log('▶ dealer targets (Book2 → 2026-03)');
-    const insertTarget = db.prepare(`
-        INSERT OR REPLACE INTO dealer_month_target
-            (dealer_code, period_yyyymm, retail_target, wholesale_target)
-        VALUES (?, ?, ?, ?)
-    `);
-    // match by short name
+    const insertTarget = db.prepare(insertSql('dealer_month_target',
+        ['dealer_code','period_yyyymm','retail_target','wholesale_target'],
+        { onConflict: 'replace', conflictKey: 'dealer_code, period_yyyymm' }));
     const shortToCode = new Map();
     dealerMap.forEach(d => {
         if (d.dealer_short_name) shortToCode.set(norm(d.dealer_short_name), d.dealer_code);
     });
     let tCount = 0;
-    targets.forEach(t => {
+    for (const t of targets) {
         const code = shortToCode.get(norm(t.short));
-        if (!code) return;
-        insertTarget.run(code, '2026-03', t.rtl, t.ws);
+        if (!code) continue;
+        await insertTarget.run({
+            dealer_code: code, period_yyyymm: '2026-03',
+            retail_target: t.rtl, wholesale_target: t.ws
+        });
         tCount++;
-    });
+    }
     console.log('   targets applied:', tCount);
 
     // ---------- Summary ----------
+    const cnt = async table => Number((await db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get()).c);
     const counts = {
-        dealer:            db.prepare('SELECT COUNT(*) c FROM dealer').get().c,
-        retail_sale:       db.prepare('SELECT COUNT(*) c FROM retail_sale').get().c,
-        wholesale_sale:    db.prepare('SELECT COUNT(*) c FROM wholesale_sale').get().c,
-        scheme:            db.prepare('SELECT COUNT(*) c FROM scheme').get().c,
-        scheme_claim_line: db.prepare('SELECT COUNT(*) c FROM scheme_claim_line').get().c,
-        isac_payment_line: db.prepare('SELECT COUNT(*) c FROM isac_payment_line').get().c,
-        total_claimed:     db.prepare('SELECT ROUND(SUM(calculated_amount)) c FROM scheme_claim_line').get().c,
-        total_paid:        db.prepare('SELECT ROUND(SUM(amount_payable)) c FROM isac_payment_line').get().c
+        dealer:            await cnt('dealer'),
+        retail_sale:       await cnt('retail_sale'),
+        wholesale_sale:    await cnt('wholesale_sale'),
+        scheme:            await cnt('scheme'),
+        scheme_claim_line: await cnt('scheme_claim_line'),
+        isac_payment_line: await cnt('isac_payment_line')
     };
     console.log('ETL complete:', counts);
-    db.close();
+    await db.close();
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

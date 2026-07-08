@@ -632,6 +632,24 @@ async function boot() {
         console.error(e);
         return;
     }
+    if (STATE.meta.empty) {
+        document.getElementById('main').innerHTML = `
+          <div class="page-header"><div>
+            <h1>Database is empty</h1>
+            <div class="subtitle">The reporting DB has no data yet.</div>
+          </div></div>
+          <div class="panel full">
+            <div class="panel-head"><h3>How to populate</h3></div>
+            <div style="padding:16px 0; color:var(--body); line-height:1.7;">
+              ${STATE.meta.message || ''}<br><br>
+              On your local machine (where the <code>files/</code> folder lives), run:
+              <pre style="background:var(--canvas-soft);padding:16px;border-radius:8px;margin-top:12px;overflow:auto;">DATABASE_URL="${'<your postgres url>'}" node etl.js</pre>
+              Once ingest completes, refresh this page.
+            </div>
+          </div>
+        `;
+        return;
+    }
     initFilters();
     document.getElementById('stat-schemes').textContent = STATE.meta.filter_options.scheme.length;
     document.getElementById('stat-dealers').textContent = STATE.meta.filter_options.dealer.length;

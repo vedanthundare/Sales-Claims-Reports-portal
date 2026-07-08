@@ -79,7 +79,7 @@ const CLAIMS_CTE = `
 
 // ─── Role-aware KPI endpoints ────────────────────────────────────────────
 const kpis = {
-    manager(db, filters) {
+    async manager(db, filters) {
         const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind','model_group']);
         // Re-alias for the CTE
         const w = whereSQL.replace(/scl\./g,'j.').replace(/^WHERE/, 'WHERE');
@@ -91,7 +91,7 @@ const kpis = {
         const w2 = w
             ? w + ' AND (j.calculated_amount > 0 OR j.paid_amount > 0)'
             : 'WHERE (j.calculated_amount > 0 OR j.paid_amount > 0)';
-        const rows = db.prepare(`
+        const rows = await db.prepare(`
             ${CLAIMS_CTE}
             SELECT
                 COUNT(*)                             AS claim_lines,
@@ -111,10 +111,10 @@ const kpis = {
         `).get(params);
         return rows || {};
     },
-    dealer(db, filters) {
+    async dealer(db, filters) {
         if (!filters.dealer_code) return null;
         const params = { dealer_code: filters.dealer_code, period: filters.period_yyyymm || '2026-03' };
-        const info = db.prepare(`
+        const info = await db.prepare(`
             SELECT d.dealer_code, d.dealer_short_name, d.dealer_name, d.zone, d.state, d.rsm,
                    -- targets are seeded per outlet in Book2; match on short-name and
                    -- take the max so the primary + branches share the same target.
@@ -133,7 +133,7 @@ const kpis = {
         `).get(params) || {};
 
         // aggregate across all outlets sharing this dealer_short_name
-        const codesRow = db.prepare(`
+        const codesRow = await db.prepare(`
             SELECT dealer_short_name FROM dealer WHERE dealer_code = @dealer_code
         `).get(params);
         const shortName = codesRow ? codesRow.dealer_short_name : null;
@@ -142,16 +142,16 @@ const kpis = {
             : `= @dealer_code`;
         const p2 = { ...params, short: shortName };
 
-        const retail = db.prepare(`
+        const retail = Number((await db.prepare(`
             SELECT COUNT(*) AS c FROM retail_sale
              WHERE dealer_code ${codeFilter} AND period_yyyymm = @period
-        `).get(p2).c;
-        const ws = db.prepare(`
+        `).get(p2)).c);
+        const ws = Number((await db.prepare(`
             SELECT COUNT(*) AS c FROM wholesale_sale
              WHERE dealer_code ${codeFilter} AND period_yyyymm = @period
-        `).get(p2).c;
+        `).get(p2)).c);
 
-        const money = db.prepare(`
+        const money = await db.prepare(`
             SELECT
                 ROUND(COALESCE(SUM(scl.calculated_amount),0)) AS claimed,
                 ROUND(COALESCE((SELECT SUM(ip.amount_payable)
@@ -177,10 +177,10 @@ const kpis = {
             pending: (money.claimed || 0) - (money.paid || 0)
         };
     },
-    finance(db, filters) {
+    async finance(db, filters) {
         const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
         const w = whereSQL.replace(/scl\./g,'j.');
-        const totals = db.prepare(`
+        const totals = await db.prepare(`
             ${CLAIMS_CTE}
             SELECT
                 ROUND(SUM(j.calculated_amount))              AS total_claimed,
@@ -191,7 +191,7 @@ const kpis = {
              ${w}
         `).get(params) || {};
 
-        const isacTotals = db.prepare(`
+        const isacTotals = await db.prepare(`
             SELECT COUNT(*) AS rfa_lines,
                    ROUND(SUM(amount_payable)) AS isac_total,
                    COUNT(DISTINCT scheme_code) AS rfa_count
@@ -205,10 +205,10 @@ const kpis = {
 
 // ─── Dashboard chart data ─────────────────────────────────────────────────
 const charts = {
-    topDealersByPayout(db, filters) {
+    async topDealersByPayout(db, filters) {
         const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
         const w = whereSQL.replace(/scl\./g,'j.');
-        return db.prepare(`
+        return await db.prepare(`
             ${CLAIMS_CTE}
             SELECT COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer,
                    ROUND(SUM(j.calculated_amount)) AS claimed,
@@ -221,10 +221,10 @@ const charts = {
              LIMIT 10
         `).all(params);
     },
-    schemeMix(db, filters) {
+    async schemeMix(db, filters) {
         const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','model_group']);
         const w = whereSQL.replace(/scl\./g,'j.');
-        return db.prepare(`
+        return await db.prepare(`
             ${CLAIMS_CTE}
             SELECT j.scheme_name AS label,
                    ROUND(SUM(j.calculated_amount)) AS value
@@ -234,10 +234,10 @@ const charts = {
              ORDER BY value DESC
         `).all(params);
     },
-    zonePayout(db, filters) {
+    async zonePayout(db, filters) {
         const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','scheme_type','scheme_kind','model_group']);
         const w = whereSQL.replace(/scl\./g,'j.');
-        return db.prepare(`
+        return await db.prepare(`
             ${CLAIMS_CTE}
             SELECT COALESCE(d.zone,'Unknown') AS zone,
                    ROUND(SUM(j.calculated_amount)) AS claimed,
@@ -249,10 +249,10 @@ const charts = {
              ORDER BY claimed DESC
         `).all(params);
     },
-    modelMix(db, filters) {
+    async modelMix(db, filters) {
         const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
         const w = whereSQL.replace(/scl\./g,'j.');
-        return db.prepare(`
+        return await db.prepare(`
             ${CLAIMS_CTE}
             SELECT COALESCE(j.model_group,'Other') AS label,
                    ROUND(SUM(j.calculated_amount)) AS value
@@ -262,10 +262,10 @@ const charts = {
              ORDER BY value DESC
         `).all(params);
     },
-    statusBreakdown(db, filters) {
+    async statusBreakdown(db, filters) {
         const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
         const w = whereSQL.replace(/scl\./g,'j.');
-        return db.prepare(`
+        return await db.prepare(`
             ${CLAIMS_CTE}
             SELECT j.status AS label, COUNT(*) AS count,
                    ROUND(SUM(j.calculated_amount)) AS amount
@@ -274,15 +274,15 @@ const charts = {
              GROUP BY j.status
         `).all(params);
     },
-    reconciliation(db, filters) {
+    async reconciliation(db, filters) {
         // If dealer_code is supplied, aggregate across all outlets of the same
         // dealer_short_name (BRITE has 6+ codes; showing one gives wrong totals).
         let dealerCodes = null;
         if (filters.dealer_code) {
-            const row = db.prepare('SELECT dealer_short_name FROM dealer WHERE dealer_code = ?').get(filters.dealer_code);
+            const row = await db.prepare('SELECT dealer_short_name FROM dealer WHERE dealer_code = ?').get(filters.dealer_code);
             if (row && row.dealer_short_name) {
-                dealerCodes = db.prepare('SELECT dealer_code FROM dealer WHERE dealer_short_name = ?')
-                    .all(row.dealer_short_name).map(r => r.dealer_code);
+                dealerCodes = (await db.prepare('SELECT dealer_code FROM dealer WHERE dealer_short_name = ?')
+                    .all(row.dealer_short_name)).map(r => r.dealer_code);
             }
         }
         const filters2 = { ...filters };
@@ -295,7 +295,7 @@ const charts = {
             w = w ? `${w} AND j.dealer_code IN (${placeholders})`
                   : `WHERE j.dealer_code IN (${placeholders})`;
         }
-        return db.prepare(`
+        return await db.prepare(`
             ${CLAIMS_CTE}
             SELECT j.scheme_code, j.scheme_name,
                    ROUND(SUM(j.calculated_amount)) AS claimed,
@@ -333,7 +333,7 @@ const reports = {
             ]
         },
         filters: ['period_yyyymm','zone','dealer_code','scheme_type','scheme_kind','group_by'],
-        run(db, p) {
+        async run(db, p) {
             const groupBy = (p.group_by || 'dealer');
             const groupExpr = groupBy === 'scheme' ? 'j.scheme_name'
                             : groupBy === 'period' ? 'j.period_yyyymm'
@@ -356,7 +356,7 @@ const reports = {
                  ORDER BY claimed_amount DESC
                  LIMIT 200
             `;
-            const rows = db.prepare(sql).all(params).map(r => ({
+            const rows = (await db.prepare(sql).all(params)).map(r => ({
                 ...r,
                 efficiency_flag: r.approval_rate >= 80 ? 'HIGH'
                                : r.approval_rate >= 50 ? 'MEDIUM'
@@ -388,7 +388,7 @@ const reports = {
             ]
         },
         filters: ['period_yyyymm','zone','scheme_type','scheme_kind'],
-        run(db, p) {
+        async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','scheme_type','scheme_kind']);
             const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
@@ -408,7 +408,7 @@ const reports = {
                  ORDER BY gap_amount DESC
                  LIMIT 200
             `;
-            const rows = db.prepare(sql).all(params).map(r => ({
+            const rows = (await db.prepare(sql).all(params)).map(r => ({
                 ...r,
                 risk_band: (r.rejection_pct >= 40 || r.pending_pct >= 70) ? 'HIGH'
                          : (r.rejection_pct >= 15 || r.pending_pct >= 40) ? 'MEDIUM'
@@ -437,46 +437,50 @@ const reports = {
             ]
         },
         filters: ['period_yyyymm','zone','dealer_code','scheme_type','scheme_kind'],
-        run(db, p) {
+        async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','dealer_code','scheme_type','scheme_kind']);
             const w = whereSQL.replace(/scl\./g,'j.');
-            // Aging measured by scheme kind: RETAIL uses delivery date age; WHOLESALE uses ws_date age
+            // Fetch per-line aged rows, then bucket in JS (portable across SQLite / Postgres).
             const sql = `
-                ${CLAIMS_CTE}, aged AS (
-                    SELECT j.*,
-                        COALESCE(rs.delivery_date, ws.ws_date, j.period_yyyymm || '-15') AS anchor_date
-                      FROM joined j
-                 LEFT JOIN retail_sale rs    ON rs.vin = j.vin
-                 LEFT JOIN wholesale_sale ws ON ws.chassis = j.vin
-                     ${w}
-                )
-                SELECT bucket AS aging_bucket,
-                       COUNT(*) AS lines,
-                       ROUND(SUM(CASE WHEN status IN ('PENDING','REJECTED') THEN calculated_amount ELSE 0 END)) AS amount_at_risk,
-                       SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END) AS rejected_lines,
-                       ROUND(SUM(CASE WHEN status='REJECTED' THEN calculated_amount ELSE 0 END)) AS leakage_amount
-                  FROM (
-                    SELECT
-                        CASE
-                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 30  THEN '0-30 days'
-                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 60  THEN '31-60 days'
-                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 90  THEN '61-90 days'
-                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 120 THEN '91-120 days'
-                            ELSE '120+ days'
-                        END AS bucket,
-                        status, calculated_amount
-                      FROM aged
-                     WHERE calculated_amount > 0
-                  )
-                 GROUP BY bucket
-                 ORDER BY CASE bucket
-                           WHEN '0-30 days' THEN 1
-                           WHEN '31-60 days' THEN 2
-                           WHEN '61-90 days' THEN 3
-                           WHEN '91-120 days' THEN 4
-                           ELSE 5 END
+                ${CLAIMS_CTE}
+                SELECT COALESCE(rs.delivery_date, ws.ws_date, j.period_yyyymm || '-15') AS anchor_date,
+                       j.status, j.calculated_amount
+                  FROM joined j
+             LEFT JOIN retail_sale rs    ON rs.vin = j.vin
+             LEFT JOIN wholesale_sale ws ON ws.chassis = j.vin
+                 ${w ? w + ' AND' : 'WHERE'} j.calculated_amount > 0
             `;
-            const rows = db.prepare(sql).all(params);
+            const raw = await db.prepare(sql).all(params);
+            const REF = new Date('2026-06-30').getTime();
+            const buckets = {
+                '0-30 days':    { lines: 0, amount_at_risk: 0, rejected_lines: 0, leakage_amount: 0 },
+                '31-60 days':   { lines: 0, amount_at_risk: 0, rejected_lines: 0, leakage_amount: 0 },
+                '61-90 days':   { lines: 0, amount_at_risk: 0, rejected_lines: 0, leakage_amount: 0 },
+                '91-120 days':  { lines: 0, amount_at_risk: 0, rejected_lines: 0, leakage_amount: 0 },
+                '120+ days':    { lines: 0, amount_at_risk: 0, rejected_lines: 0, leakage_amount: 0 }
+            };
+            raw.forEach(r => {
+                const anchor = r.anchor_date && String(r.anchor_date).match(/^\d{4}-\d{2}-\d{2}/)
+                    ? new Date(r.anchor_date).getTime() : REF - 999 * 86400000;
+                const ageDays = Math.floor((REF - anchor) / 86400000);
+                const key = ageDays <= 30 ? '0-30 days'
+                          : ageDays <= 60 ? '31-60 days'
+                          : ageDays <= 90 ? '61-90 days'
+                          : ageDays <= 120 ? '91-120 days'
+                          : '120+ days';
+                const b = buckets[key];
+                b.lines++;
+                const amt = Number(r.calculated_amount) || 0;
+                if (r.status === 'PENDING' || r.status === 'REJECTED') b.amount_at_risk += amt;
+                if (r.status === 'REJECTED') { b.rejected_lines++; b.leakage_amount += amt; }
+            });
+            const rows = Object.entries(buckets).map(([aging_bucket, v]) => ({
+                aging_bucket,
+                lines: v.lines,
+                amount_at_risk: Math.round(v.amount_at_risk),
+                rejected_lines: v.rejected_lines,
+                leakage_amount: Math.round(v.leakage_amount)
+            }));
             return { rows, summary: {
                 total_at_risk: rows.reduce((s,r)=>s+(r.amount_at_risk||0),0),
                 total_leakage: rows.reduce((s,r)=>s+(r.leakage_amount||0),0)
@@ -503,7 +507,7 @@ const reports = {
             ]
         },
         filters: ['period_yyyymm','zone','scheme_type','scheme_kind'],
-        run(db, p) {
+        async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','scheme_type','scheme_kind']);
             const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
@@ -521,7 +525,7 @@ const reports = {
                  GROUP BY j.scheme_code, COALESCE(d.zone,'Unknown')
                  ORDER BY j.scheme_name, zone
             `;
-            const rows = db.prepare(sql).all(params).map(r => ({
+            const rows = (await db.prepare(sql).all(params)).map(r => ({
                 ...r,
                 roi_score: r.achievement_pct >= 80 ? 'STRONG'
                          : r.achievement_pct >= 50 ? 'AVERAGE'
@@ -550,10 +554,10 @@ const reports = {
             ]
         },
         filters: ['zone','scheme_kind'],
-        run(db, p) {
+        async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['zone','scheme_kind']);
             const w = whereSQL.replace(/scl\./g,'j.');
-            const rows = db.prepare(`
+            const rows = await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT j.scheme_kind AS kind,
                        ROUND(SUM(j.paid_amount)) AS payout
@@ -601,10 +605,10 @@ const reports = {
             ]
         },
         filters: ['period_yyyymm','zone','dealer_code','scheme_type'],
-        run(db, p) {
+        async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','dealer_code','scheme_type']);
             const w = whereSQL.replace(/scl\./g,'j.');
-            const rows = db.prepare(`
+            const rows = (await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT j.dealer_code,
                        COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
@@ -621,7 +625,7 @@ const reports = {
                 HAVING lines_evaluated >= 5
                  ORDER BY paid_pct DESC
                  LIMIT 200
-            `).all(params).map(r => ({
+            `).all(params)).map(r => ({
                 ...r,
                 tier: r.paid_pct >= 85 ? 'GOLD'
                     : r.paid_pct >= 60 ? 'SILVER'
@@ -652,10 +656,10 @@ const reports = {
             ]
         },
         filters: ['zone'],
-        run(db, p) {
+        async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['zone']);
             const w = whereSQL.replace(/scl\./g,'j.');
-            const rows = db.prepare(`
+            const rows = (await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT j.dealer_code,
                        COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
@@ -672,7 +676,7 @@ const reports = {
                 HAVING open_exposure > 0 OR activity = 0
                  ORDER BY open_exposure DESC
                  LIMIT 200
-            `).all(params).map(r => ({
+            `).all(params)).map(r => ({
                 ...r,
                 activity_flag: r.activity === 0 ? 'DORMANT'
                              : r.activity < 5   ? 'LOW ACTIVITY'
@@ -703,14 +707,14 @@ const reports = {
             ]
         },
         filters: ['period_yyyymm','zone','scheme_type'],
-        run(db, p) {
+        async run(db, p) {
             const filters = { ...p };
             if (!filters.scheme_type) filters._auto = 1;
             const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type']);
             const auto = filters._auto ? (whereSQL ? " AND s.scheme_type IN ('CORPORATE','EXCHANGE')" : "WHERE s.scheme_type IN ('CORPORATE','EXCHANGE')") : '';
             const w = (whereSQL + auto).replace(/scl\./g,'j.');
 
-            const rows = db.prepare(`
+            const rows = (await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
                        COALESCE(d.zone,'Unknown') AS zone,
@@ -730,12 +734,12 @@ const reports = {
                 HAVING unpaid_lines > 0
                  ORDER BY unpaid_amount DESC
                  LIMIT 100
-            `).all(params).map(r => ({
+            `).all(params)).map(r => ({
                 ...r,
                 heat: r.unpaid_lines >= 20 ? 'HOT' : r.unpaid_lines >= 8 ? 'WARM' : 'COOL'
             }));
 
-            const matrixRows = db.prepare(`
+            const matrixRows = await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT COALESCE(d.zone,'Unknown') AS zone,
                        j.scheme_type,
@@ -749,7 +753,7 @@ const reports = {
                 HAVING disputes > 0
             `).all(params);
 
-            const rootCauses = db.prepare(`
+            const rootCauses = await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT COALESCE(NULLIF(j.remarks,''),'(none)') AS cause,
                        COUNT(*) AS cnt
@@ -803,7 +807,7 @@ const reports = {
             ]
         },
         filters: ['zone'],
-        run(db, p) {
+        async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['zone']);
             const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
@@ -839,7 +843,7 @@ const reports = {
                             WHEN 'No DAN' THEN 0 WHEN '< 1 Lakh' THEN 1
                             WHEN '1-3 Lakh' THEN 2 WHEN '3-5 Lakh' THEN 3 ELSE 4 END
             `;
-            const rows = db.prepare(sql).all(params);
+            const rows = await db.prepare(sql).all(params);
             const baseline = rows.find(r => r.support_band === 'No DAN');
             const withImpact = rows.map(r => ({
                 ...r,
