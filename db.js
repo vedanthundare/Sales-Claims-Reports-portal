@@ -34,6 +34,12 @@ async function openPg(url) {
 
     function bindPg(sql, params) {
         if (params == null) return { text: sql, values: [] };
+        // Single scalar (string/number/boolean) → treat as a single positional bind.
+        if (typeof params !== 'object' || params instanceof Date) {
+            let i = 0;
+            const text = sql.replace(/\?/g, () => `$${++i}`);
+            return { text, values: [params] };
+        }
         if (Array.isArray(params)) {
             let i = 0;
             const text = sql.replace(/\?/g, () => `$${++i}`);
