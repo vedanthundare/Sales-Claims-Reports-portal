@@ -210,7 +210,7 @@ const charts = {
         const w = whereSQL.replace(/scl\./g,'j.');
         return await db.prepare(`
             ${CLAIMS_CTE}
-            SELECT COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer,
+            SELECT MIN(COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code)) AS dealer,
                    ROUND(SUM(j.calculated_amount)) AS claimed,
                    ROUND(SUM(j.paid_amount))       AS paid
               FROM joined j
@@ -226,7 +226,7 @@ const charts = {
         const w = whereSQL.replace(/scl\./g,'j.');
         return await db.prepare(`
             ${CLAIMS_CTE}
-            SELECT j.scheme_name AS label,
+            SELECT MIN(j.scheme_name) AS label,
                    ROUND(SUM(j.calculated_amount)) AS value
               FROM joined j
              ${w}
@@ -304,7 +304,7 @@ const charts = {
               FROM joined j
              ${w}
              GROUP BY j.scheme_code, j.scheme_name
-            HAVING claimed > 0 OR paid > 0
+            HAVING SUM(j.calculated_amount) > 0 OR SUM(j.paid_amount) > 0
              ORDER BY claimed DESC
         `).all(params);
     }
@@ -394,8 +394,8 @@ const reports = {
             const sql = `
                 ${CLAIMS_CTE}
                 SELECT j.dealer_code,
-                       COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
-                       COALESCE(d.zone,'Unknown') AS zone,
+                       MIN(COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code)) AS dealer_name,
+                       MIN(COALESCE(d.zone,'Unknown')) AS zone,
                        COUNT(*) AS total_lines,
                        ROUND(100.0 * SUM(CASE WHEN j.status='REJECTED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS rejection_pct,
                        ROUND(100.0 * SUM(CASE WHEN j.status='PENDING'  THEN 1 ELSE 0 END) / COUNT(*), 1) AS pending_pct,
@@ -404,7 +404,7 @@ const reports = {
              LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
                  ${w}
                  GROUP BY j.dealer_code
-                HAVING total_lines >= 5
+                HAVING COUNT(*) >= 5
                  ORDER BY gap_amount DESC
                  LIMIT 200
             `;
@@ -512,18 +512,18 @@ const reports = {
             const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
                 ${CLAIMS_CTE}
-                SELECT j.scheme_name, j.scheme_type,
+                SELECT MIN(j.scheme_name) AS scheme_name, MIN(j.scheme_type) AS scheme_type,
                        COALESCE(d.zone,'Unknown') AS zone,
                        COUNT(*) AS lines,
                        SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) AS approved,
                        ROUND(SUM(j.paid_amount)) AS paid_amount,
-                       j.target_payout,
-                       ROUND(100.0 * SUM(j.paid_amount) / NULLIF(j.target_payout,0), 1) AS achievement_pct
+                       MIN(j.target_payout) AS target_payout,
+                       ROUND(100.0 * SUM(j.paid_amount) / NULLIF(MIN(j.target_payout),0), 1) AS achievement_pct
                   FROM joined j
              LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
                  ${w}
                  GROUP BY j.scheme_code, COALESCE(d.zone,'Unknown')
-                 ORDER BY j.scheme_name, zone
+                 ORDER BY scheme_name, zone
             `;
             const rows = (await db.prepare(sql).all(params)).map(r => ({
                 ...r,
@@ -608,25 +608,45 @@ const reports = {
         async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','dealer_code','scheme_type']);
             const w = whereSQL.replace(/scl\./g,'j.');
-            const rows = (await db.prepare(`
+            const dealerRows = await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT j.dealer_code,
-                       COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
+                       MIN(COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code)) AS dealer_name,
                        COUNT(*) AS lines_evaluated,
-                       ROUND(100.0 * SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS paid_pct,
-                       (SELECT scheme_name FROM (
-                           SELECT j2.scheme_name, SUM(j2.paid_amount) AS s
-                             FROM joined j2 WHERE j2.dealer_code = j.dealer_code
-                             GROUP BY j2.scheme_name ORDER BY s DESC LIMIT 1)) AS top_scheme
+                       ROUND(100.0 * SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS paid_pct
                   FROM joined j
              LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
                  ${w}
                  GROUP BY j.dealer_code
-                HAVING lines_evaluated >= 5
+                HAVING COUNT(*) >= 5
                  ORDER BY paid_pct DESC
                  LIMIT 200
-            `).all(params)).map(r => ({
+            `).all(params);
+            // top_scheme lookup (batched)
+            const codes = dealerRows.map(r => r.dealer_code);
+            let topSchemeByDealer = new Map();
+            if (codes.length) {
+                const inList = codes.map((_, i) => `@c${i}`).join(',');
+                const inParams = {};
+                codes.forEach((c, i) => { inParams[`c${i}`] = c; });
+                const topRows = await db.prepare(`
+                    ${CLAIMS_CTE}
+                    SELECT j.dealer_code, MIN(j.scheme_name) AS scheme_name,
+                           SUM(j.paid_amount) AS paid
+                      FROM joined j
+                     WHERE j.dealer_code IN (${inList})
+                     GROUP BY j.dealer_code, j.scheme_code
+                `).all(inParams);
+                const byDealer = new Map();
+                topRows.forEach(r => {
+                    const cur = byDealer.get(r.dealer_code);
+                    if (!cur || Number(r.paid) > Number(cur.paid)) byDealer.set(r.dealer_code, r);
+                });
+                byDealer.forEach((v, k) => topSchemeByDealer.set(k, v.scheme_name));
+            }
+            const rows = dealerRows.map(r => ({
                 ...r,
+                top_scheme: topSchemeByDealer.get(r.dealer_code) || null,
                 tier: r.paid_pct >= 85 ? 'GOLD'
                     : r.paid_pct >= 60 ? 'SILVER'
                     : r.paid_pct >= 30 ? 'BRONZE'
@@ -659,12 +679,25 @@ const reports = {
         async run(db, p) {
             const { whereSQL, params } = buildWhere(p, ['zone']);
             const w = whereSQL.replace(/scl\./g,'j.');
-            const rows = (await db.prepare(`
+            // Prefetch retail+wholesale activity counts by dealer (period=2026-03)
+            const activityRows = await db.prepare(`
+                SELECT dealer_code, COUNT(*) AS c FROM retail_sale
+                 WHERE period_yyyymm = '2026-03'
+                 GROUP BY dealer_code
+                UNION ALL
+                SELECT dealer_code, COUNT(*) AS c FROM wholesale_sale
+                 WHERE period_yyyymm = '2026-03'
+                 GROUP BY dealer_code
+            `).all();
+            const activityByDealer = new Map();
+            activityRows.forEach(r => {
+                activityByDealer.set(r.dealer_code, (activityByDealer.get(r.dealer_code) || 0) + Number(r.c));
+            });
+
+            const claimRows = await db.prepare(`
                 ${CLAIMS_CTE}
                 SELECT j.dealer_code,
-                       COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
-                       COALESCE((SELECT COUNT(*) FROM retail_sale WHERE dealer_code = j.dealer_code AND period_yyyymm='2026-03'),0) +
-                       COALESCE((SELECT COUNT(*) FROM wholesale_sale WHERE dealer_code = j.dealer_code AND period_yyyymm='2026-03'),0) AS activity,
+                       MIN(COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code)) AS dealer_name,
                        SUM(CASE WHEN j.status='PENDING'  THEN 1 ELSE 0 END) AS open_lines,
                        ROUND(SUM(CASE WHEN j.status='PENDING'  THEN j.calculated_amount ELSE 0 END)) AS open_exposure,
                        SUM(CASE WHEN j.status='REJECTED' THEN 1 ELSE 0 END) AS rejected_lines,
@@ -673,15 +706,20 @@ const reports = {
              LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
                  ${w}
                  GROUP BY j.dealer_code
-                HAVING open_exposure > 0 OR activity = 0
                  ORDER BY open_exposure DESC
-                 LIMIT 200
-            `).all(params)).map(r => ({
-                ...r,
-                activity_flag: r.activity === 0 ? 'DORMANT'
-                             : r.activity < 5   ? 'LOW ACTIVITY'
-                             : 'ACTIVE'
-            }));
+                 LIMIT 500
+            `).all(params);
+
+            const rows = claimRows
+                .map(r => ({ ...r, activity: activityByDealer.get(r.dealer_code) || 0 }))
+                .filter(r => Number(r.open_exposure) > 0 || r.activity === 0)
+                .slice(0, 200)
+                .map(r => ({
+                    ...r,
+                    activity_flag: r.activity === 0 ? 'DORMANT'
+                                 : r.activity < 5   ? 'LOW ACTIVITY'
+                                 : 'ACTIVE'
+                }));
             return { rows, summary: {
                 dormant: rows.filter(r => r.activity_flag === 'DORMANT').length,
                 total_exposure: rows.reduce((s,r)=>s+(r.open_exposure||0),0)
@@ -716,22 +754,18 @@ const reports = {
 
             const rows = (await db.prepare(`
                 ${CLAIMS_CTE}
-                SELECT COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
-                       COALESCE(d.zone,'Unknown') AS zone,
+                SELECT MIN(COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code)) AS dealer_name,
+                       MIN(COALESCE(d.zone,'Unknown')) AS zone,
                        j.scheme_type,
                        SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN 1 ELSE 0 END) AS unpaid_lines,
                        ROUND(SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN j.calculated_amount ELSE 0 END)) AS unpaid_amount,
-                       (SELECT j2.remarks FROM joined j2
-                          WHERE j2.dealer_code = j.dealer_code
-                            AND j2.scheme_type = j.scheme_type
-                            AND j2.remarks IS NOT NULL AND j2.remarks <> ''
-                          GROUP BY j2.remarks ORDER BY COUNT(*) DESC LIMIT 1) AS top_remark
+                       MIN(CASE WHEN j.remarks IS NOT NULL AND j.remarks <> '' THEN j.remarks END) AS top_remark
                   FROM joined j
              LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
              LEFT JOIN scheme s ON s.scheme_code = j.scheme_code
                  ${w}
                  GROUP BY j.dealer_code, j.scheme_type
-                HAVING unpaid_lines > 0
+                HAVING SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN 1 ELSE 0 END) > 0
                  ORDER BY unpaid_amount DESC
                  LIMIT 100
             `).all(params)).map(r => ({
@@ -750,7 +784,7 @@ const reports = {
              LEFT JOIN scheme s ON s.scheme_code = j.scheme_code
                  ${w}
                  GROUP BY COALESCE(d.zone,'Unknown'), j.scheme_type
-                HAVING disputes > 0
+                HAVING SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN 1 ELSE 0 END) > 0
             `).all(params);
 
             const rootCauses = await db.prepare(`
