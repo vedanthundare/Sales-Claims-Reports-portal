@@ -5,8 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "dev":"node server.js",
     "seed": "node seed.js",
-    "init": "node seed.js && node server.js"
+    "etl": "node etl.js",
+    "init": "node etl.js && node server.js"
   },
   "engines": {
     "node": ">=20.0.0"

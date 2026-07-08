@@ -3,3 +3,12 @@ data/
 server.log
 .env
 .DS_Store
+
+# Confidential source data — do not publish
+files/
+DEPLOY.md
+DESIGN-wise.md
+etl.log
+Reports.zip
+invoice-*.pdf
+

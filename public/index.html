@@ -2,24 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Skoda Sales Claims — Reports & MIS</title>
+<title>Skoda Sales & Payout Insights</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <link rel="icon" type="image/png" href="/skoda.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Manrope:wght@700;800;900&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Manrope:wght@700;800;900&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="/config.js"></script>
 <style>
-/* ============================================================
-   Skoda Sales Claims — Reports & MIS
-   Visual language: Wise-inspired (sage canvas, lime CTA, ink ink,
-   heavy display sans + Inter, 24 px pill radius).
-   ============================================================ */
 :root {
-    /* Wise-inspired core palette */
     --primary:        #9fe870;
     --primary-active: #cdffad;
     --primary-pale:   #e2f6d5;
@@ -31,38 +23,29 @@
     --mute:           #868685;
 
     --canvas:         #ffffff;
-    --canvas-soft:    #e8ebe6;
+    --canvas-soft:    #f2f4ef;
+    --canvas-line:    #e6ebe0;
 
     --positive:       #2ead4b;
-    --positive-deep:  #054d28;
     --warning:        #ffd11a;
-    --warning-deep:   #b86700;
     --warning-content:#4a3b1c;
     --negative:       #d03238;
-    --negative-deep:  #a72027;
-    --negative-bg:    #320707;
     --accent-orange:  #ffc091;
     --accent-cyan:    #38c8ff;
-
-    /* Sample-PDF accents (forest green title band, etc.) */
-    --report-green:   #2f9e44;            /* sample title band */
-    --report-green-d: #1b5e20;            /* table header */
-    --report-blue:    #2766c8;            /* secondary chart series */
+    --accent-violet:  #9b7cff;
+    --accent-teal:    #26c4a4;
 
     --shadow-sm: 0 1px 2px rgba(14,15,12,.04), 0 1px 3px rgba(14,15,12,.05);
     --shadow-md: 0 4px 14px rgba(14,15,12,.07), 0 1px 3px rgba(14,15,12,.04);
-    --shadow-lg: 0 18px 48px rgba(14,15,12,.10), 0 2px 6px rgba(14,15,12,.04);
 
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 16px;
     --radius-xl: 24px;
 }
-
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html, body { height: 100%; margin: 0; }
 body {
-    margin: 0;
     font-family: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     background: var(--canvas-soft);
     color: var(--ink);
@@ -72,1116 +55,1140 @@ body {
 }
 .display { font-family: 'Manrope', 'Inter', system-ui, sans-serif; font-weight: 900; letter-spacing: -0.5px; }
 
-/* ============================================================
-   App shell — sage canvas with white sidebar + topbar
-   ============================================================ */
-.app {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    grid-template-rows: 72px 1fr;
-    grid-template-areas:
-        "side topbar"
-        "side main";
-    height: 100vh;
-}
-
-/* ============================================================
-   Sidebar — white card, ink text, primary active indicator
-   ============================================================ */
-.sidebar {
-    grid-area: side;
-    background: var(--canvas);
-    border-right: 1px solid var(--canvas-soft);
-    color: var(--ink);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-.sidebar-brand {
-    height: 72px;
-    padding: 0 24px;
-    display: flex; flex-direction: column; justify-content: center;
-    border-bottom: 1px solid var(--canvas-soft);
-}
-.sidebar-brand img {
-    height: 30px;
-    width: auto;
-    object-fit: contain;
-    object-position: left;
-}
-.sidebar-brand .role-tag {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1.6px;
-    color: var(--mute);
-    margin-top: 6px;
-}
-
-.sidebar-section {
-    padding: 20px 24px 8px;
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1.8px;
-    color: var(--mute);
-}
-
-.sidebar-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 12px 16px;
-}
-.sidebar-list::-webkit-scrollbar { width: 4px; }
-.sidebar-list::-webkit-scrollbar-thumb { background: var(--canvas-soft); border-radius: 2px; }
-
-.report-item {
-    position: relative;
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 12px 14px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    margin-bottom: 2px;
-    color: var(--ink);
-    font-weight: 500;
-    font-size: 13px;
-    transition: background .15s, color .15s;
-}
-.report-item:hover { background: var(--canvas-soft); }
-.report-item.active {
-    background: var(--primary-pale);
-    color: var(--ink);
-}
-.report-item.active::before {
-    content: '';
-    position: absolute;
-    left: 0; top: 8px; bottom: 8px;
-    width: 4px;
-    border-radius: 999px;
-    background: var(--primary);
-}
-.report-item .r-num {
-    flex-shrink: 0;
-    width: 26px; height: 26px;
-    border-radius: 999px;
-    background: var(--canvas-soft);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--ink);
-}
-.report-item.active .r-num { background: var(--primary); color: var(--on-primary); }
-.report-item .r-content { flex: 1; min-width: 0; }
-.report-item .r-title { line-height: 1.35; font-weight: 600; }
-.report-item .r-desc {
-    font-size: 11.5px;
-    color: var(--mute);
-    margin-top: 2px;
-    line-height: 1.4;
-    font-weight: 400;
-}
-
-.sidebar-foot {
-    padding: 14px 24px;
-    border-top: 1px solid var(--canvas-soft);
-    font-size: 11px;
-    color: var(--mute);
-}
-.sidebar-foot strong { color: var(--ink); font-weight: 700; }
-
-/* ============================================================
-   Topbar — white, ink text
-   ============================================================ */
+/* ---------- Topbar ---------- */
 .topbar {
-    grid-area: topbar;
     background: var(--canvas);
-    border-bottom: 1px solid var(--canvas-soft);
+    border-bottom: 1px solid var(--canvas-line);
+    padding: 0 32px;
+    height: 68px;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0 28px;
-    position: relative; z-index: 5;
+    position: sticky; top: 0; z-index: 10;
 }
-.topbar h1 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 700;
+.brand { display: flex; align-items: center; gap: 14px; }
+.brand img { height: 26px; }
+.brand .brand-title {
+    font-family: 'Manrope', sans-serif;
+    font-weight: 900;
+    font-size: 15px;
     letter-spacing: -.2px;
 }
-.topbar h1 small {
+.brand .brand-sub {
+    font-size: 11px;
     color: var(--mute);
-    font-weight: 400;
-    margin-left: 12px;
-    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    font-weight: 700;
+    margin-top: 2px;
 }
-.topbar-right { display: flex; align-items: center; gap: 10px; }
-.pill {
+.topbar-right { display: flex; gap: 10px; align-items: center; }
+.stat-pill {
     background: var(--canvas-soft);
-    border: 1px solid transparent;
     border-radius: 999px;
     padding: 6px 14px;
     font-size: 12px;
-    color: var(--ink);
-    font-weight: 600;
-    display: inline-flex; align-items: center; gap: 8px;
-}
-.pill .dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--primary);
-    box-shadow: 0 0 0 3px rgba(159, 232, 112, .25);
-}
-
-/* ============================================================
-   Main scroll area — sage canvas
-   ============================================================ */
-.main {
-    grid-area: main;
-    overflow-y: auto;
-    padding: 28px 32px 56px;
-}
-
-/* ============================================================
-   Sticky filter bar (above the report)
-   ============================================================ */
-.filter-card {
-    background: var(--canvas);
-    border: 1px solid transparent;
-    border-radius: var(--radius-xl);
-    padding: 22px 24px 20px;
-    margin-bottom: 22px;
-    box-shadow: var(--shadow-sm);
-}
-.filter-card .f-head {
-    display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 14px;
-}
-.filter-card h3 {
-    margin: 0;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 1.6px;
-    color: var(--mute);
-}
-.f-head .meta-row {
-    font-size: 12px;
-    color: var(--mute);
-}
-.filters-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
-    gap: 12px;
-}
-.filter-field label {
-    display: block;
-    font-size: 11px;
     color: var(--body);
     font-weight: 600;
-    margin-bottom: 5px;
 }
-.filter-field input,
-.filter-field select {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--ink);
-    border-radius: var(--radius-md);
-    font-size: 14px;
-    background: var(--canvas);
-    color: var(--ink);
-    font-family: inherit;
-    transition: box-shadow .15s;
-}
-.filter-field input:focus,
-.filter-field select:focus {
-    outline: none;
-    box-shadow: 0 0 0 3px var(--primary-pale);
-}
+.stat-pill strong { color: var(--ink); }
 
-.btn-row {
-    margin-top: 16px;
-    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+/* ---------- Role selector (like Wise account switcher) ---------- */
+.role-bar {
+    background: var(--canvas);
+    border-bottom: 1px solid var(--canvas-line);
+    padding: 14px 32px;
+    display: flex; gap: 10px; align-items: center;
+    overflow-x: auto;
 }
-button {
-    padding: 11px 20px;
-    border-radius: var(--radius-xl);
-    font-size: 14px;
+.role-tab {
+    padding: 8px 18px;
+    border-radius: 999px;
+    background: var(--canvas-soft);
+    color: var(--body);
     font-weight: 600;
+    font-size: 13px;
     cursor: pointer;
     border: 1px solid transparent;
-    font-family: inherit;
-    transition: transform .12s, background .15s, box-shadow .15s, border-color .15s;
     display: inline-flex; align-items: center; gap: 8px;
+    transition: background .15s, color .15s, border-color .15s;
+    white-space: nowrap;
 }
-button:disabled { opacity: .4; cursor: not-allowed; }
-.btn-primary {
-    background: var(--primary);
-    color: var(--on-primary);
-}
-.btn-primary:hover:not(:disabled) {
-    background: var(--primary-active);
-    transform: translateY(-1px);
-}
-.btn-secondary {
-    background: var(--canvas-soft);
-    color: var(--ink);
-}
-.btn-secondary:hover:not(:disabled) { background: #d8dcd5; }
-.btn-tertiary {
-    background: var(--canvas);
-    color: var(--ink);
-    border-color: var(--ink);
-}
-.btn-tertiary:hover:not(:disabled) { background: var(--canvas-soft); }
-.btn-spacer { flex: 1; }
-
-/* ============================================================
-   Welcome hero (only when no report selected)
-   ============================================================ */
-.welcome-hero {
-    background: var(--canvas);
-    border-radius: var(--radius-xl);
-    padding: 56px 48px;
-    box-shadow: var(--shadow-sm);
-    margin-bottom: 22px;
-}
-.welcome-hero h2 {
-    font-family: 'Manrope', 'Inter', sans-serif;
-    font-weight: 900;
-    font-size: 56px;
-    line-height: 1.05;
-    letter-spacing: -1px;
-    margin: 0 0 16px;
-    color: var(--ink);
-}
-.welcome-hero p {
-    font-size: 18px;
-    line-height: 1.5;
-    color: var(--body);
-    max-width: 720px;
-    margin: 0 0 24px;
-    font-weight: 400;
-}
-.welcome-tags { display: flex; flex-wrap: wrap; gap: 8px; }
-.welcome-tag {
-    background: var(--canvas-soft);
-    border-radius: 999px;
-    padding: 6px 14px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--ink);
-}
-
-/* ============================================================
-   Report card — mimic the PDF "page"
-   ============================================================ */
-.report-page {
-    background: var(--canvas);
-    border-radius: var(--radius-xl);
-    box-shadow: var(--shadow-sm);
-    overflow: hidden;
-    margin-bottom: 22px;
-}
-
-/* Title band — green band at top of every PDF report */
-.title-band {
-    background: var(--report-green);
+.role-tab:hover { background: var(--canvas-line); }
+.role-tab.active {
+    background: var(--ink);
     color: #fff;
-    padding: 32px 40px 28px;
 }
-.title-band .eyebrow {
+.role-tab .r-icon {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--primary);
+}
+.role-tab.active .r-icon { background: var(--primary-active); }
+.role-bar .role-spacer { flex: 1; }
+.filter-inline {
+    display: flex; gap: 10px; align-items: center; flex-wrap: nowrap;
+}
+.filter-inline select {
+    background: var(--canvas-soft);
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-family: inherit;
     font-size: 13px;
+    color: var(--ink);
     font-weight: 600;
-    opacity: .92;
-    margin-bottom: 10px;
+    cursor: pointer;
+    max-width: 220px;
 }
-.title-band h2 {
-    font-family: 'Manrope', 'Inter', sans-serif;
-    font-weight: 900;
-    font-size: 38px;
-    line-height: 1.08;
-    letter-spacing: -.6px;
-    margin: 0 0 8px;
-}
-.title-band .sub {
-    font-size: 14px;
-    opacity: .92;
-    font-weight: 400;
-}
+.filter-inline select:focus { outline: none; box-shadow: 0 0 0 3px var(--primary-pale); }
 
-/* Scope strip — second band beneath title (like sample) */
-.scope-strip {
+/* ---------- Main ---------- */
+.main { padding: 28px 32px 64px; max-width: 1600px; margin: 0 auto; }
+.page-header {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    margin-bottom: 20px; gap: 24px;
+}
+.page-header h1 {
+    font-family: 'Manrope', sans-serif;
+    font-weight: 900;
+    font-size: 28px;
+    letter-spacing: -.4px;
+    margin: 0;
+}
+.page-header .subtitle {
+    color: var(--mute);
+    font-size: 13px;
+    margin-top: 6px;
+}
+.help-tip {
+    display: inline-block;
     background: var(--primary-pale);
     color: var(--ink-deep);
-    padding: 12px 40px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 13px;
-    font-weight: 600;
-    border-bottom: 1px solid #d1e6bf;
-    flex-wrap: wrap;
-    gap: 12px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    cursor: help;
+    margin-left: 6px;
 }
-.scope-strip .sl { color: var(--ink-deep); }
-.scope-strip .sl span { color: var(--body); font-weight: 500; }
-.scope-strip .sr { color: var(--ink-deep); }
-.scope-strip .sr span { color: var(--body); font-weight: 500; }
 
-/* KPI tiles — 4-up just like the sample */
-.kpi-band {
-    padding: 24px 40px 8px;
+/* ---------- KPI cards ---------- */
+.kpi-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 14px;
+    margin-bottom: 24px;
 }
-.kpi {
-    background: var(--canvas-soft);
+.kpi-card {
+    background: var(--canvas);
     border-radius: var(--radius-lg);
-    padding: 16px 18px;
+    padding: 22px 22px 20px;
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--canvas-line);
+    position: relative;
 }
-.kpi-key {
+.kpi-card .kpi-label {
+    font-size: 11px;
+    color: var(--mute);
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    font-weight: 700;
+    margin-bottom: 12px;
+}
+.kpi-card .kpi-value {
+    font-family: 'Manrope', sans-serif;
+    font-weight: 900;
+    font-size: 30px;
+    letter-spacing: -.6px;
+    line-height: 1.1;
+    color: var(--ink);
+}
+.kpi-card .kpi-value.small { font-size: 22px; }
+.kpi-card .kpi-hint {
+    margin-top: 8px;
     font-size: 12px;
     color: var(--body);
-    font-weight: 500;
-    margin-bottom: 6px;
 }
-.kpi-val {
-    font-family: 'Manrope', 'Inter', sans-serif;
-    font-weight: 900;
-    font-size: 26px;
-    color: var(--ink);
-    letter-spacing: -.4px;
-    font-variant-numeric: tabular-nums;
-}
-.kpi-sub {
-    margin-top: 4px;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--positive);
-}
-.kpi-sub.warn { color: var(--warning-deep); }
-.kpi-sub.neg  { color: var(--negative-deep); }
+.kpi-card.accent { background: var(--ink); color: #fff; }
+.kpi-card.accent .kpi-label { color: rgba(255,255,255,.7); }
+.kpi-card.accent .kpi-value { color: var(--primary); }
+.kpi-card.accent .kpi-hint { color: rgba(255,255,255,.7); }
 
-/* Numbered sections — match the PDF "1. Headline Metrics" style */
-.section {
-    padding: 24px 40px 8px;
-}
-.section h3 {
-    font-family: 'Manrope', 'Inter', sans-serif;
-    font-weight: 900;
-    font-size: 22px;
-    letter-spacing: -.3px;
-    color: var(--report-green-d);
-    margin: 14px 0 14px;
-}
-.section h4 {
-    font-family: 'Inter', sans-serif;
+.kpi-card .kpi-chip {
+    position: absolute; top: 20px; right: 20px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
     font-weight: 700;
-    font-size: 14px;
-    color: var(--ink);
-    margin: 0 0 10px;
+    background: var(--primary-pale); color: var(--ink-deep);
 }
+.kpi-card .kpi-chip.warn { background: #fff3d1; color: var(--warning-content); }
+.kpi-card .kpi-chip.bad  { background: #ffe1e1; color: var(--negative); }
 
-/* Tables — PDF look: dark green header, alternating ivory rows */
-.tbl-wrap { overflow: auto; border-radius: var(--radius-md); }
-table.report-table {
+/* ---------- Panels ---------- */
+.panel-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+.panel-row.thirds { grid-template-columns: 1fr 1fr 1fr; }
+.panel-row.wide-left { grid-template-columns: 2fr 1fr; }
+.panel {
+    background: var(--canvas);
+    border: 1px solid var(--canvas-line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    padding: 22px 22px 20px;
+    min-height: 320px;
+    display: flex; flex-direction: column;
+}
+.panel.full { grid-column: 1 / -1; }
+.panel-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 14px;
+}
+.panel-head h3 {
+    margin: 0;
+    font-family: 'Manrope', sans-serif;
+    font-weight: 800;
+    font-size: 15px;
+    letter-spacing: -.2px;
+}
+.panel-head .p-sub {
+    font-size: 11px;
+    color: var(--mute);
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    font-weight: 700;
+}
+.panel-body { flex: 1; min-height: 0; position: relative; }
+.chart-wrap { position: relative; height: 260px; }
+.chart-wrap.tall { height: 320px; }
+
+/* ---------- Tables ---------- */
+.data-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
-    background: var(--canvas);
 }
-table.report-table thead th {
-    background: var(--report-green-d);
-    color: #fff;
+.data-table thead th {
     text-align: left;
-    padding: 11px 14px;
-    font-weight: 700;
-    font-size: 12.5px;
-    white-space: nowrap;
-}
-table.report-table thead th:last-child { text-align: right; }
-table.report-table tbody td {
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--canvas-soft);
-    font-variant-numeric: tabular-nums;
-}
-table.report-table tbody td:last-child { text-align: right; }
-table.report-table tbody tr:nth-child(even) { background: #f3f7ee; }
-table.report-table tbody tr:hover { background: var(--primary-pale); }
-
-/* Charts */
-.chart-wrap {
-    height: 280px;
-    margin-bottom: 12px;
-}
-
-/* Findings + Recommendations blocks — flat (no grey box) */
-.findings, .recommendations {
-    background: transparent;
-    border-radius: 0;
-    padding: 8px 0 0;
-    margin-top: 0;
-}
-.findings ul, .recommendations ol {
-    margin: 0;
-    padding-left: 22px;
-    font-size: 14px;
+    background: var(--canvas-soft);
     color: var(--body);
+    font-weight: 700;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--canvas-line);
+    white-space: nowrap;
+    position: sticky; top: 0;
 }
-.findings li, .recommendations li { margin: 6px 0; line-height: 1.5; }
-.findings li b, .recommendations li b { color: var(--ink); font-weight: 700; }
-
-/* PDF-style footer */
-.report-foot {
-    padding: 18px 40px;
-    border-top: 1px solid var(--canvas-soft);
-    color: var(--mute);
-    font-size: 12px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+.data-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--canvas-line);
+    vertical-align: top;
 }
+.data-table tbody tr:hover { background: var(--canvas-soft); }
+.data-table .num  { text-align: right; font-variant-numeric: tabular-nums; }
+.data-table .rank { color: var(--mute); font-weight: 700; width: 24px; }
+.table-scroll { overflow-x: auto; max-height: 520px; }
 
-/* Badges (used in tables) */
 .badge {
     display: inline-block;
     padding: 3px 10px;
     border-radius: 999px;
     font-size: 11px;
     font-weight: 700;
-    line-height: 1.5;
-    letter-spacing: .3px;
+    background: var(--canvas-soft);
+    color: var(--body);
+    letter-spacing: .2px;
+    white-space: nowrap;
 }
-.badge.HIGH, .badge.HOT, .badge.UNDERPERFORMING, .badge.NEEDS, .badge.NEGATIVE,
-.badge.NEARING_EXIT, .badge.LOW {
-    background: #fde7e8; color: var(--negative-deep);
-}
-.badge.MEDIUM, .badge.WARM, .badge.AVERAGE, .badge.BRONZE, .badge.NEUTRAL,
-.badge.INCREASE, .badge.MODERATE {
-    background: #fff5cc; color: var(--warning-content);
-}
-.badge.STRONG, .badge.GOLD, .badge.SILVER, .badge.COOL,
-.badge.ADEQUATE, .badge.APPROVED, .badge.ACTIVE {
-    background: var(--primary-pale); color: var(--positive-deep);
-}
-.badge.EXITED, .badge.TIME_BARRED, .badge.REJECTED {
-    background: var(--canvas-soft); color: var(--body);
+.badge.HIGH, .badge.STRONG, .badge.APPROVED, .badge.GOLD, .badge.ACTIVE, .badge.ADEQUATE { background: var(--primary-pale); color: var(--ink-deep); }
+.badge.MEDIUM, .badge.AVERAGE, .badge.WATCH, .badge.SILVER, .badge.WARM, .badge.PENDING, .badge.MODERATE { background: #fff3d1; color: var(--warning-content); }
+.badge.LOW, .badge.UNDER, .badge.NEEDS, .badge.HOT, .badge.REJECTED, .badge.NEGATIVE, .badge.DORMANT, .badge.INCREASE { background: #ffe1e1; color: var(--negative); }
+.badge.NEUTRAL, .badge.BRONZE, .badge.COOL { background: var(--canvas-line); color: var(--body); }
+
+/* ---------- Glossary popover ---------- */
+.gloss {
+    text-decoration: underline dotted var(--mute);
+    cursor: help;
 }
 
-/* States */
-.empty, .loader {
-    text-align: center;
-    padding: 60px 20px;
-    color: var(--mute);
-}
+/* ---------- Loader ---------- */
 .spinner {
-    width: 40px; height: 40px;
-    border: 3px solid var(--canvas-soft);
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--canvas-line);
     border-top-color: var(--primary);
     border-radius: 50%;
-    animation: spin .9s linear infinite;
-    margin: 0 auto 14px;
+    animation: spin 0.9s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-
-/* Heatmap (Report 8) — PDF style: green-scale matrix */
-.heatmap-card { padding: 0 40px 8px; }
-table.heatmap {
-    border-collapse: separate;
-    border-spacing: 4px;
-    width: 100%;
-    margin-bottom: 8px;
-}
-table.heatmap th {
-    color: var(--body);
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-weight: 700;
-    padding: 6px 8px;
+.empty {
+    padding: 40px 16px;
     text-align: center;
+    color: var(--mute);
+    font-size: 13px;
 }
-table.heatmap th.row-head {
-    text-align: right;
+
+/* ---------- Reports view specific ---------- */
+.report-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.report-tile {
+    background: var(--canvas);
+    border: 1px solid var(--canvas-line);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    cursor: pointer;
+    transition: transform .12s, box-shadow .15s, border-color .15s;
+}
+.report-tile:hover {
+    border-color: var(--primary);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+.report-tile.active {
+    border-color: var(--ink);
+    background: var(--primary-pale);
+}
+.report-tile .rt-num {
+    display: inline-block;
+    background: var(--canvas-soft);
     color: var(--ink);
     font-weight: 700;
-    font-size: 13px;
-    text-transform: none;
-    letter-spacing: 0;
-    width: 110px;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    margin-bottom: 8px;
 }
-.heat-cell {
-    width: 100%;
-    height: 88px;
-    border-radius: var(--radius-md);
-    color: var(--ink-deep);
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    font-weight: 800;
-    font-size: 22px;
-    font-family: 'Manrope', sans-serif;
+.report-tile.active .rt-num { background: var(--primary); }
+.report-tile .rt-title {
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--ink);
+    margin-bottom: 4px;
 }
-.heat-cell .hc-meta {
-    font-size: 11px;
-    font-weight: 600;
-    margin-top: 4px;
-    color: var(--ink-deep);
-    opacity: .8;
-    text-transform: none;
-    letter-spacing: 0;
-    font-family: 'Inter', sans-serif;
-}
-.heat-cell.empty { background: var(--canvas-soft); color: var(--mute); font-size: 14px; font-weight: 500; }
-.heatmap-legend {
-    display: flex; align-items: center; gap: 10px;
-    margin-top: 6px;
-    font-size: 12px; color: var(--body);
-}
-.heatmap-legend .gradient {
-    flex: 1; height: 8px; border-radius: 999px;
-    background: linear-gradient(90deg, #fffce8 0%, #c5edab 35%, #2ead4b 75%, #054d28 100%);
+.report-tile .rt-desc {
+    font-size: 12px;
+    color: var(--mute);
+    line-height: 1.4;
 }
 
-@media (max-width: 980px) {
-    .app {
-        grid-template-columns: 1fr;
-        grid-template-rows: 72px auto 1fr;
-        grid-template-areas:
-            "topbar"
-            "side"
-            "main";
-    }
-    .sidebar { max-height: 320px; }
-    .title-band, .scope-strip, .kpi-band, .section, .heatmap-card, .report-foot { padding-left: 24px; padding-right: 24px; }
-    .welcome-hero { padding: 40px 28px; }
-    .welcome-hero h2 { font-size: 40px; }
+.section-divider {
+    margin: 32px 0 16px;
+    font-family: 'Manrope', sans-serif;
+    font-weight: 800;
+    font-size: 16px;
+    color: var(--ink);
+    display: flex; align-items: center; gap: 12px;
+}
+.section-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--canvas-line);
+}
+
+/* ---------- Dealer picker ---------- */
+.dealer-picker {
+    display: flex; gap: 12px; align-items: center;
+    background: var(--canvas);
+    border: 1px solid var(--canvas-line);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    margin-bottom: 20px;
+}
+.dealer-picker input, .dealer-picker select {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--canvas-line);
+    border-radius: var(--radius-md);
+    font-family: inherit;
+    font-size: 13px;
+}
+
+.progress-bar {
+    background: var(--canvas-soft);
+    border-radius: 999px;
+    height: 10px;
+    overflow: hidden;
+    margin-top: 6px;
+}
+.progress-bar .fill {
+    height: 100%;
+    background: var(--primary);
+    border-radius: 999px;
+    transition: width .4s;
+}
+.progress-bar .fill.warn { background: var(--warning); }
+.progress-bar .fill.bad  { background: var(--negative); }
+
+/* ---------- Reports tab ---------- */
+.filter-card {
+    background: var(--canvas);
+    border: 1px solid var(--canvas-line);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.filter-card .fc-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 12px;
+}
+.filter-card h4 {
+    margin: 0;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--mute);
+    font-weight: 700;
+}
+.filter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
+}
+.filter-grid label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--body);
+    margin-bottom: 4px;
+}
+.filter-grid select, .filter-grid input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--canvas-line);
+    border-radius: var(--radius-md);
+    font-family: inherit;
+    font-size: 13px;
+    background: var(--canvas);
+}
+.action-row { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
+button {
+    padding: 10px 18px;
+    border-radius: 999px;
+    border: none;
+    font-family: inherit;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    transition: transform .1s, background .15s;
+}
+.btn-primary { background: var(--primary); color: var(--on-primary); }
+.btn-primary:hover { background: var(--primary-active); transform: translateY(-1px); }
+.btn-secondary { background: var(--canvas-soft); color: var(--ink); }
+.btn-secondary:hover { background: var(--canvas-line); }
+
+/* ---------- Responsive ---------- */
+@media (max-width: 900px) {
+    .panel-row, .panel-row.thirds, .panel-row.wide-left { grid-template-columns: 1fr; }
+    .main { padding: 20px 16px 40px; }
+    .topbar { padding: 0 16px; }
+    .role-bar { padding: 12px 16px; }
+    .page-header { flex-direction: column; align-items: flex-start; }
 }
 </style>
 </head>
 <body>
 
-<div class="app">
-
-    <aside class="sidebar">
-        <div class="sidebar-brand">
-            <img src="/skoda.png" alt="Skoda" />
-            <span class="role-tag">Reports & MIS</span>
+<!-- ============================== Topbar ============================== -->
+<header class="topbar">
+    <div class="brand">
+        <img src="/skoda.png" alt="Skoda" onerror="this.style.display='none'"/>
+        <div>
+            <div class="brand-title">Sales &amp; Payout Insights</div>
+            <div class="brand-sub">Skoda Auto India · March 2026</div>
         </div>
+    </div>
+    <div class="topbar-right">
+        <span class="stat-pill"><strong id="stat-schemes">–</strong> schemes</span>
+        <span class="stat-pill"><strong id="stat-dealers">–</strong> dealers</span>
+        <span class="stat-pill"><strong id="stat-vins">–</strong> vehicles</span>
+    </div>
+</header>
 
-        <div class="sidebar-section">Analytical Reports</div>
-        <div class="sidebar-list" id="report-list"></div>
-
-        <div class="sidebar-foot" id="env-info">Loading datamart…</div>
-    </aside>
-
-    <header class="topbar">
-        <h1>Sales Claims Reports <small>Tactical & Base Payouts</small></h1>
-        <div class="topbar-right">
-            <span class="pill"><span class="dot"></span> Datamart Online</span>
-            <span class="pill" id="last-run">No report run yet</span>
-        </div>
-    </header>
-
-    <main class="main">
-
-        <section class="welcome-hero" id="welcome-hero">
-            <h2 class="display">Skoda Sales Claims & Payouts MIS</h2>
-            <p>Pick one of the nine analytical reports on the left, set your filters, and generate boardroom-ready insights into Tactical &amp; Base payouts across dealers, schemes, and regions.</p>
-            <div class="welcome-tags">
-                <span class="welcome-tag">9 reports</span>
-                <span class="welcome-tag">Pan-India coverage</span>
-                <span class="welcome-tag">CSV / Excel export</span>
-                <span class="welcome-tag">Confidential — internal use only</span>
-            </div>
-        </section>
-
-        <section class="filter-card" id="filter-section" style="display:none">
-            <div class="f-head">
-                <h3>Filters</h3>
-                <span class="meta-row" id="filter-count"></span>
-            </div>
-            <div class="filters-grid" id="filters"></div>
-            <div class="btn-row">
-                <button class="btn-primary" id="run-btn">Generate report</button>
-                <button class="btn-secondary" id="reset-btn">Reset filters</button>
-                <span class="btn-spacer"></span>
-                <button class="btn-tertiary" id="download-pdf" disabled>Download PDF</button>
-                <button class="btn-tertiary" id="download-csv" disabled>Download CSV</button>
-                <button class="btn-tertiary" id="download-xlsx" disabled>Download Excel</button>
-            </div>
-        </section>
-
-        <section id="report-output"></section>
-
-    </main>
-
+<!-- ============================== Role bar ============================== -->
+<div class="role-bar">
+    <span class="role-tab active" data-role="manager"><span class="r-icon"></span>Sales Manager</span>
+    <span class="role-tab" data-role="dealer"><span class="r-icon"></span>Dealer View</span>
+    <span class="role-tab" data-role="finance"><span class="r-icon"></span>Finance / Audit</span>
+    <span class="role-tab" data-role="reports"><span class="r-icon"></span>Detailed Reports</span>
+    <span class="role-spacer"></span>
+    <div class="filter-inline">
+        <select id="global-period"></select>
+        <select id="global-zone"></select>
+        <select id="global-kind">
+            <option value="">All scheme kinds</option>
+            <option value="RETAIL">Retail schemes</option>
+            <option value="WHOLESALE">Wholesale schemes</option>
+        </select>
+    </div>
 </div>
 
-<script>
-/* ============================================================
-   Formatters
-   ============================================================ */
-const FMT = {
-    inr: v => v == null || v === '' ? '—' : '₹ ' + Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 }),
-    cr:  v => v == null || v === '' ? '—' : (Number(v) / 1e7).toFixed(2) + ' Cr',
-    pct: v => v == null || v === '' ? '—' : Number(v).toFixed(1) + '%',
-    int: v => v == null || v === '' ? '—' : Number(v).toLocaleString('en-IN'),
-    num: v => v == null || v === '' ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 1 }),
-    text: v => v == null || v === '' ? '—' : String(v),
-    badge: v => {
-        if (!v) return '—';
-        const cls = String(v).split(/[\s+\-(]/)[0].replace(/[^A-Z_]/g, '');
-        return `<span class="badge ${cls}">${v}</span>`;
-    }
-};
-const inrCr = v => v == null ? '—' : (Number(v) / 1e7).toFixed(2) + ' Cr';
-const titleCase = s => String(s).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-const todayLong = () => new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+<!-- ============================== Main ============================== -->
+<main class="main" id="main"></main>
 
-let META = null;
-let CURRENT = null;
+<script>
+/* ==========================================================
+   Config & helpers
+========================================================== */
+const API_BASE = (window.__API_BASE || '').replace(/\/$/, '');
+const API = p => `${API_BASE}${p}`;
+
+const CROREE = 1e7;
+const LAKH = 1e5;
+const inrCr = v => v == null || v === '' ? '—' : '₹' + (Number(v) / CROREE).toFixed(2) + ' Cr';
+const inr = v => v == null || v === '' ? '—' : '₹' + Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+const inrShort = v => {
+    if (v == null || v === '') return '—';
+    const n = Number(v);
+    if (Math.abs(n) >= CROREE) return '₹' + (n / CROREE).toFixed(2) + 'Cr';
+    if (Math.abs(n) >= LAKH) return '₹' + (n / LAKH).toFixed(1) + 'L';
+    return '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+};
+const num = v => v == null || v === '' ? '—' : Number(v).toLocaleString('en-IN');
+const pct = v => v == null || v === '' ? '—' : Number(v).toFixed(1) + '%';
+const fmt = { inr, int: num, pct, num: v => v == null ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 1 }),
+              text: v => v == null || v === '' ? '—' : String(v),
+              badge: v => {
+                  if (!v) return '—';
+                  const cls = String(v).split(/[\s+\-(]/)[0].replace(/[^A-Z_]/g, '');
+                  return `<span class="badge ${cls}">${v}</span>`;
+              } };
+
+const CHART_COLORS = ['#9fe870', '#38c8ff', '#9b7cff', '#ffc091', '#26c4a4', '#ffd11a', '#ff8c8c', '#3a5a40', '#4a90e2', '#c084fc', '#f472b6'];
+
+/* Glossary of jargon → plain english (shown as tooltips) */
+const GLOSS = {
+    'SKSL':      'Skoda Sales Scheme Ledger — the scheme code prefix used internally.',
+    'ISAC':      'Integrated Statement of Adjustment & Credit — the actual payment ledger between Skoda and the dealer.',
+    'RFA':       'Request For Authorization — one authorized payment line to a dealer.',
+    'DAN':       'Dealer Advance / Nurture Support — upfront tactical support paid per retail delivery.',
+    'CP8':       'Checkpoint 8 — the wholesale checkpoint when a vehicle leaves the plant.',
+    'MY':        'Model Year (car spec year).',
+    'VY':        'Vehicle Year (year of production).',
+    'RB':        'Regional Booster — a region-specific model incentive.',
+    'RSM':       'Regional Sales Manager — cluster owner covering multiple dealers.',
+    'HSN':       'Harmonized System Nomenclature — the tax classification code.',
+    'Ex-SR':     'Ex-Showroom Retail price.',
+    'CDD':       'Customer Delivery Document.',
+    'FnF':       'Full & Final settlement — dealer exit finance closure.',
+    'INR':       'Indian Rupee.',
+    'Cr':        'Crore = 10,000,000 (1 followed by 7 zeros).',
+    'Lakh':      'Lakh = 100,000.'
+};
+
+function tip(term) {
+    const info = GLOSS[term] || '';
+    return `<span class="gloss" title="${info}">${term}</span>`;
+}
+
+/* ==========================================================
+   State
+========================================================== */
+const STATE = {
+    role: 'manager',
+    period: '2026-03',
+    zone: '',
+    scheme_kind: '',
+    dealer_code: '',
+    meta: null
+};
 const CHARTS = {};
 
-/* ============================================================
-   API base
-   ============================================================ */
-const API_BASE = (window.__API_BASE || '').replace(/\/$/, '');
-const API = (path) => `${API_BASE}${path}`;
-
-/* ============================================================
-   Bootstrap
-   ============================================================ */
-async function loadMeta() {
-    const r = await fetch(API('/api/meta'));
-    META = await r.json();
-    document.getElementById('env-info').innerHTML = `
-        <strong>${META.reports.length}</strong> reports ·
-        <strong>${META.filter_options.dealer.length}</strong> dealers ·
-        <strong>${META.filter_options.scheme.length}</strong> schemes
-    `;
-    renderReportList();
+function qs() {
+    const p = new URLSearchParams();
+    if (STATE.period)      p.set('period_yyyymm', STATE.period);
+    if (STATE.zone)        p.set('zone', STATE.zone);
+    if (STATE.scheme_kind) p.set('scheme_kind', STATE.scheme_kind);
+    if (STATE.dealer_code) p.set('dealer_code', STATE.dealer_code);
+    return p.toString();
+}
+async function fetchJson(path) {
+    const r = await fetch(API(path));
+    if (!r.ok) throw new Error(`${path} → ${r.status}`);
+    return r.json();
 }
 
-function renderReportList() {
-    const list = document.getElementById('report-list');
-    list.innerHTML = '';
-    META.reports.forEach((r, idx) => {
+/* ==========================================================
+   Bootstrap
+========================================================== */
+async function boot() {
+    try {
+        STATE.meta = await fetchJson('/api/meta');
+    } catch (e) {
+        document.getElementById('main').innerHTML =
+            `<div class="empty">Backend not reachable. Is <code>npm start</code> running on this port?</div>`;
+        console.error(e);
+        return;
+    }
+    initFilters();
+    document.getElementById('stat-schemes').textContent = STATE.meta.filter_options.scheme.length;
+    document.getElementById('stat-dealers').textContent = STATE.meta.filter_options.dealer.length;
+    // vehicles: sum of scheme lines (rough) — we'll ask for it via manager KPI
+    document.querySelectorAll('.role-tab').forEach(el => {
+        el.addEventListener('click', () => setRole(el.dataset.role));
+    });
+    setRole('manager');
+}
+
+function initFilters() {
+    const period = document.getElementById('global-period');
+    period.innerHTML = STATE.meta.filter_options.period_yyyymm
+        .map(p => `<option value="${p}">${p}</option>`).join('');
+    period.value = STATE.period;
+    period.onchange = () => { STATE.period = period.value; render(); };
+
+    const zone = document.getElementById('global-zone');
+    zone.innerHTML = '<option value="">All zones</option>' +
+        STATE.meta.filter_options.zone.map(z => `<option value="${z}">${z}</option>`).join('');
+    zone.onchange = () => { STATE.zone = zone.value; render(); };
+
+    const kind = document.getElementById('global-kind');
+    kind.onchange = () => { STATE.scheme_kind = kind.value; render(); };
+}
+
+function setRole(role) {
+    STATE.role = role;
+    document.querySelectorAll('.role-tab').forEach(el =>
+        el.classList.toggle('active', el.dataset.role === role));
+    render();
+}
+
+async function render() {
+    Object.values(CHARTS).forEach(c => c.destroy());
+    for (const k in CHARTS) delete CHARTS[k];
+    const main = document.getElementById('main');
+    main.innerHTML = `<div class="empty"><span class="spinner"></span>Loading…</div>`;
+    try {
+        if      (STATE.role === 'manager') await renderManager(main);
+        else if (STATE.role === 'dealer')  await renderDealer(main);
+        else if (STATE.role === 'finance') await renderFinance(main);
+        else                                await renderReports(main);
+    } catch (e) {
+        main.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+        console.error(e);
+    }
+}
+
+/* ==========================================================
+   Manager view
+========================================================== */
+async function renderManager(main) {
+    const q = qs();
+    const [kpi, topDealers, schemeMix, zonePayout, modelMix, statusBrk] = await Promise.all([
+        fetchJson('/api/kpis/manager?'  + q),
+        fetchJson('/api/charts/topDealersByPayout?' + q),
+        fetchJson('/api/charts/schemeMix?' + q),
+        fetchJson('/api/charts/zonePayout?' + q),
+        fetchJson('/api/charts/modelMix?' + q),
+        fetchJson('/api/charts/statusBreakdown?' + q)
+    ]);
+
+    main.innerHTML = `
+      <div class="page-header">
+        <div>
+          <h1>Sales Manager Overview</h1>
+          <div class="subtitle">
+              How much has been claimed, how much has been paid, and which dealers / schemes / regions are driving it.
+              <span class="help-tip" title="Data from ${STATE.meta.filter_options.scheme.length} schemes across all Skoda dealers">${STATE.period}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi-card accent">
+          <div class="kpi-label">Total Payout Claimed</div>
+          <div class="kpi-value">${inrCr(kpi.total_claimed)}</div>
+          <div class="kpi-hint">Across ${num(kpi.claim_lines)} claim lines</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Paid via ${tip('ISAC')} (incl. GST)</div>
+          <div class="kpi-value">${inrCr(kpi.total_paid)}</div>
+          <div class="kpi-hint">${pct(kpi.approval_rate)} of lines have hit ISAC</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Unpaid (Pending + Rejected)</div>
+          <div class="kpi-value">${inrCr(kpi.gap)}</div>
+          <div class="kpi-hint">${num(kpi.pending_count)} pending · ${num(kpi.rejected_count)} rejected</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Dealers Active</div>
+          <div class="kpi-value">${num(kpi.dealers_active)}</div>
+          <div class="kpi-hint">${num(kpi.schemes_active)} live schemes</div>
+        </div>
+      </div>
+
+      <div class="panel-row wide-left">
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Top 10 Dealers by Amount Claimed</h3>
+            <span class="p-sub">Claimed vs Paid</span>
+          </div>
+          <div class="panel-body">
+            <div class="chart-wrap tall"><canvas id="ch-top"></canvas></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Payout by Scheme</h3>
+            <span class="p-sub">Where the money goes</span>
+          </div>
+          <div class="panel-body">
+            <div class="chart-wrap tall"><canvas id="ch-scheme"></canvas></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-row thirds">
+        <div class="panel">
+          <div class="panel-head"><h3>Zone-wise Payout</h3><span class="p-sub">India-I vs India-II</span></div>
+          <div class="panel-body"><div class="chart-wrap"><canvas id="ch-zone"></canvas></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Model Mix</h3><span class="p-sub">Where payouts land</span></div>
+          <div class="panel-body"><div class="chart-wrap"><canvas id="ch-model"></canvas></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Status Breakdown</h3><span class="p-sub">Approved / Pending / Rejected</span></div>
+          <div class="panel-body"><div class="chart-wrap"><canvas id="ch-status"></canvas></div></div>
+        </div>
+      </div>
+    `;
+
+    // Charts
+    bar('ch-top', topDealers.data.map(r => r.dealer),
+        [
+            { label: 'Claimed', data: topDealers.data.map(r => r.claimed), color: '#9fe870' },
+            { label: 'Paid via ISAC', data: topDealers.data.map(r => r.paid), color: '#0e0f0c' }
+        ], { horizontal: true });
+
+    doughnut('ch-scheme',
+        schemeMix.data.map(r => r.label),
+        schemeMix.data.map(r => r.value));
+
+    bar('ch-zone', zonePayout.data.map(r => r.zone),
+        [
+            { label: 'Claimed', data: zonePayout.data.map(r => r.claimed), color: '#9fe870' },
+            { label: 'Paid', data: zonePayout.data.map(r => r.paid), color: '#38c8ff' }
+        ]);
+
+    doughnut('ch-model',
+        modelMix.data.map(r => r.label),
+        modelMix.data.map(r => r.value));
+
+    doughnut('ch-status',
+        statusBrk.data.map(r => r.label),
+        statusBrk.data.map(r => r.amount || r.count),
+        { colors: statusBrk.data.map(r => r.label === 'APPROVED' ? '#9fe870' : r.label === 'PENDING' ? '#ffd11a' : r.label === 'REJECTED' ? '#d03238' : '#e6ebe0') });
+}
+
+/* ==========================================================
+   Dealer view
+========================================================== */
+async function renderDealer(main) {
+    const dealers = STATE.meta.filter_options.dealer;
+    if (!STATE.dealer_code && dealers.length) STATE.dealer_code = dealers[0].dealer_code;
+
+    main.innerHTML = `
+      <div class="page-header">
+        <div>
+          <h1>Dealer View</h1>
+          <div class="subtitle">Pick a dealer to see their monthly targets, sales, and how much they've earned vs been paid.</div>
+        </div>
+      </div>
+      <div class="dealer-picker">
+        <label style="font-weight:600; color:var(--body); white-space:nowrap;">Dealer:</label>
+        <select id="dealer-select">
+            ${dealers.map(d => `<option value="${d.dealer_code}" ${d.dealer_code === STATE.dealer_code ? 'selected' : ''}>${d.dealer_name} (${d.dealer_code}) — ${d.zone || ''}</option>`).join('')}
+        </select>
+      </div>
+      <div id="dealer-body"></div>
+    `;
+    document.getElementById('dealer-select').onchange = e => {
+        STATE.dealer_code = e.target.value; render();
+    };
+    await renderDealerBody();
+}
+
+async function renderDealerBody() {
+    const body = document.getElementById('dealer-body');
+    body.innerHTML = `<div class="empty"><span class="spinner"></span>Loading…</div>`;
+    const q = qs();
+    const info = await fetchJson('/api/kpis/dealer?' + q);
+    if (!info) { body.innerHTML = `<div class="empty">Select a dealer above.</div>`; return; }
+
+    const rtAch = info.retail_ach_pct;
+    const wsAch = info.wholesale_ach_pct;
+    const pctClass = v => v == null ? '' : (v >= 90 ? '' : v >= 60 ? 'warn' : 'bad');
+    const pctFill = v => Math.min(100, Math.max(0, v || 0));
+
+    // Per-scheme breakdown for this dealer
+    const scheme = await fetchJson('/api/charts/reconciliation?' + q);
+
+    body.innerHTML = `
+      <div class="kpi-grid">
+        <div class="kpi-card accent">
+          <div class="kpi-label">${info.dealer_short_name || info.dealer_name || info.dealer_code}</div>
+          <div class="kpi-value small">${info.dealer_name || '—'}</div>
+          <div class="kpi-hint">${info.zone || '—'} · ${tip('RSM')} ${info.rsm || '—'}</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Retail Achievement</div>
+          <div class="kpi-value">${info.retail_sold} <span style="font-size:14px;color:var(--mute);font-weight:600;">of ${info.retail_target || '—'}</span></div>
+          <div class="progress-bar"><div class="fill ${pctClass(rtAch)}" style="width:${pctFill(rtAch)}%"></div></div>
+          <div class="kpi-hint">${rtAch == null ? 'No target set' : rtAch + '% of monthly target'}</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Wholesale Achievement</div>
+          <div class="kpi-value">${info.wholesale_taken} <span style="font-size:14px;color:var(--mute);font-weight:600;">of ${info.wholesale_target || '—'}</span></div>
+          <div class="progress-bar"><div class="fill ${pctClass(wsAch)}" style="width:${pctFill(wsAch)}%"></div></div>
+          <div class="kpi-hint">${wsAch == null ? 'No target set' : wsAch + '% of monthly target'}</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Earned this Period</div>
+          <div class="kpi-value">${inrCr(info.claimed)}</div>
+          <div class="kpi-hint">${inrCr(info.paid)} received · ${inrCr(info.pending)} still pending</div>
+        </div>
+      </div>
+
+      <div class="panel full">
+        <div class="panel-head">
+          <h3>Scheme-by-Scheme Earnings</h3>
+          <span class="p-sub">${STATE.period}</span>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Scheme</th>
+                <th class="num">Amount Owed</th>
+                <th class="num">Paid via ${tip('ISAC')}</th>
+                <th class="num">Pending</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${scheme.data.length ? scheme.data.map(r => {
+                const paidPct = r.claimed ? Math.round(100 * r.paid / r.claimed) : 0;
+                const st = paidPct >= 95 ? 'APPROVED' : paidPct >= 50 ? 'PENDING' : paidPct > 0 ? 'PENDING' : 'REJECTED';
+                return `
+                  <tr>
+                    <td>${r.scheme_name || r.scheme_code}</td>
+                    <td class="num">${inr(r.claimed)}</td>
+                    <td class="num">${inr(r.paid)}</td>
+                    <td class="num">${inr(r.gap)}</td>
+                    <td>${fmt.badge(st)} ${paidPct}%</td>
+                  </tr>`;
+              }).join('') : '<tr><td colspan="5" class="empty">No claims for this dealer in the selected period.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+}
+
+/* ==========================================================
+   Finance / Audit view
+========================================================== */
+async function renderFinance(main) {
+    const q = qs();
+    const [kpi, recon, statusBrk] = await Promise.all([
+        fetchJson('/api/kpis/finance?' + q),
+        fetchJson('/api/charts/reconciliation?' + q),
+        fetchJson('/api/charts/statusBreakdown?' + q)
+    ]);
+
+    main.innerHTML = `
+      <div class="page-header">
+        <div>
+          <h1>Finance &amp; Audit</h1>
+          <div class="subtitle">Reconcile scheme calculations against ${tip('ISAC')} payment ledger. Surface gaps, unpaid ${tip('RFA')} lines, and provisioning needs.</div>
+        </div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi-card accent">
+          <div class="kpi-label">Claimed (calc)</div>
+          <div class="kpi-value">${inrCr(kpi.total_claimed)}</div>
+          <div class="kpi-hint">Total per-VIN calculation</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Paid via ${tip('ISAC')}</div>
+          <div class="kpi-value">${inrCr(kpi.total_paid)}</div>
+          <div class="kpi-hint">${pct(kpi.paid_pct)} of claimed</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Reconciliation Gap</div>
+          <div class="kpi-value" style="color:${(kpi.gap || 0) > 0 ? 'var(--negative)' : 'var(--positive)'}">${inrCr(kpi.gap)}</div>
+          <div class="kpi-hint">Claimed – Paid</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">${tip('RFA')} Line Items</div>
+          <div class="kpi-value">${num(kpi.rfa_lines)}</div>
+          <div class="kpi-hint">${num(kpi.rfa_count)} authorizations</div>
+        </div>
+      </div>
+
+      <div class="panel-row wide-left">
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Scheme-wise Reconciliation</h3>
+            <span class="p-sub">Claimed vs Paid — where gaps hide</span>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Scheme</th>
+                  <th class="num">Claimed</th>
+                  <th class="num">Paid</th>
+                  <th class="num">Gap</th>
+                  <th class="num">Paid %</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${recon.data.map(r => {
+                    const paidPct = r.claimed ? Math.round(100 * r.paid / r.claimed) : 0;
+                    return `<tr>
+                        <td>${r.scheme_name || r.scheme_code}</td>
+                        <td class="num">${inrShort(r.claimed)}</td>
+                        <td class="num">${inrShort(r.paid)}</td>
+                        <td class="num" style="color:${r.gap > 0 ? 'var(--negative)' : 'inherit'}">${inrShort(r.gap)}</td>
+                        <td class="num">${paidPct}%</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Line Status Mix</h3><span class="p-sub">By INR value</span></div>
+          <div class="panel-body"><div class="chart-wrap tall"><canvas id="ch-fin-status"></canvas></div></div>
+        </div>
+      </div>
+    `;
+
+    doughnut('ch-fin-status',
+        statusBrk.data.map(r => r.label),
+        statusBrk.data.map(r => r.amount),
+        { colors: statusBrk.data.map(r => r.label === 'APPROVED' ? '#9fe870' : r.label === 'PENDING' ? '#ffd11a' : r.label === 'REJECTED' ? '#d03238' : '#e6ebe0') });
+}
+
+/* ==========================================================
+   Detailed Reports view (the 9 canned reports)
+========================================================== */
+let CURRENT_REPORT = null;
+async function renderReports(main) {
+    main.innerHTML = `
+      <div class="page-header">
+        <div>
+          <h1>Detailed Reports</h1>
+          <div class="subtitle">Nine analytical reports. Click a tile to open; filter and download as CSV/Excel.</div>
+        </div>
+      </div>
+      <div class="report-picker" id="report-tiles"></div>
+      <div id="report-body"></div>
+    `;
+    const tiles = document.getElementById('report-tiles');
+    STATE.meta.reports.forEach(r => {
         const el = document.createElement('div');
-        el.className = 'report-item';
-        el.dataset.id = r.id;
-        const num = r.title.match(/^(\d+)\./)?.[1] || (idx + 1);
-        const cleanTitle = r.title.replace(/^\d+\.\s*/, '');
+        el.className = 'report-tile' + (CURRENT_REPORT === r.id ? ' active' : '');
+        const numMatch = r.title.match(/^(\d+)\./);
+        const shortTitle = r.title.replace(/^\d+\.\s*/, '');
         el.innerHTML = `
-            <div class="r-num">${num}</div>
-            <div class="r-content">
-                <div class="r-title">${cleanTitle}</div>
-                <div class="r-desc">${r.description}</div>
-            </div>
+            <span class="rt-num">${numMatch ? numMatch[1] : '?'}</span>
+            <div class="rt-title">${shortTitle}</div>
+            <div class="rt-desc">${r.description}</div>
         `;
         el.onclick = () => selectReport(r.id);
-        list.appendChild(el);
+        tiles.appendChild(el);
     });
+    if (CURRENT_REPORT) await renderReport(CURRENT_REPORT);
 }
 
-function selectReport(id) {
-    CURRENT = META.reports.find(r => r.id === id);
-    document.querySelectorAll('.report-item').forEach(el =>
-        el.classList.toggle('active', el.dataset.id === id));
-
-    document.getElementById('welcome-hero').style.display = 'none';
-    document.getElementById('filter-section').style.display = '';
-    document.getElementById('report-output').innerHTML = '';
-    renderFilters();
-    setDownloadEnabled(false);
+async function selectReport(id) {
+    CURRENT_REPORT = id;
+    document.querySelectorAll('.report-tile').forEach(el =>
+        el.classList.toggle('active', el.querySelector('.rt-title').textContent ===
+            STATE.meta.reports.find(r => r.id === id).title.replace(/^\d+\.\s*/, '')));
+    await renderReport(id);
 }
 
-/* ============================================================
-   Filter rendering
-   ============================================================ */
-function renderFilters() {
-    const F = document.getElementById('filters');
-    F.innerHTML = '';
-    const opts = META.filter_options;
+async function renderReport(id) {
+    const def = STATE.meta.reports.find(r => r.id === id);
+    const body = document.getElementById('report-body');
+    body.innerHTML = `<div class="empty"><span class="spinner"></span>Loading…</div>`;
+
+    // Filter card
+    const opts = STATE.meta.filter_options;
     const filterSpec = {
-        from:        { label: 'From (claim raised)', type: 'date' },
-        to:          { label: 'To (claim raised)',   type: 'date' },
-        region:      { label: 'Region',     type: 'select', options: ['', ...opts.region] },
-        zone:        { label: 'Zone',       type: 'select', options: ['', ...opts.zone] },
-        dealer_code: { label: 'Dealer',     type: 'select', options: [{ v:'', l:'All Dealers' }, ...opts.dealer.map(d => ({ v: d.dealer_code, l: d.dealer_name + ' (' + d.dealer_code + ')' }))] },
-        scheme_code: { label: 'Scheme',     type: 'select', options: [{ v:'', l:'All Schemes' }, ...opts.scheme.map(s => ({ v: s.scheme_code, l: s.scheme_name }))] },
-        scheme_type: { label: 'Scheme Type',type: 'select', options: ['', ...opts.scheme_type] },
-        payout_kind: { label: 'Payout Kind',type: 'select', options: ['', ...opts.payout_kind] },
-        risk_band:   { label: 'Risk Band',  type: 'select', options: ['', ...opts.risk_band] },
-        fnf_status:  { label: 'FNF Status', type: 'select', options: ['', ...opts.fnf_status] },
-        status:      { label: 'Claim Status',type:'select', options: ['', ...opts.status] },
-        group_by:    { label: 'Group By',   type: 'select', options: opts.group_by }
+        period_yyyymm: { label: 'Period',       options: [{v:'',l:'All periods'}, ...opts.period_yyyymm.map(p => ({v:p,l:p}))] },
+        zone:          { label: 'Zone',         options: [{v:'',l:'All zones'}, ...opts.zone.map(z=>({v:z,l:z}))] },
+        dealer_code:   { label: 'Dealer',       options: [{v:'',l:'All dealers'}, ...opts.dealer.map(d=>({v:d.dealer_code, l: d.dealer_name}))] },
+        scheme_code:   { label: 'Scheme',       options: [{v:'',l:'All schemes'}, ...opts.scheme.map(s=>({v:s.scheme_code, l:s.scheme_name}))] },
+        scheme_type:   { label: 'Scheme Type',  options: [{v:'',l:'All'}, ...opts.scheme_type.map(x=>({v:x,l:x.replace(/_/g,' ')}))] },
+        scheme_kind:   { label: 'Scheme Kind',  options: [{v:'',l:'All'}, ...opts.scheme_kind.map(x=>({v:x,l:x}))] },
+        group_by:      { label: 'Group By',     options: opts.group_by.map(x=>({v:x,l:x})) }
     };
-    (CURRENT.filters || []).forEach((key) => {
-        const spec = filterSpec[key];
-        if (!spec) return;
-        const wrap = document.createElement('div');
-        wrap.className = 'filter-field';
-        wrap.innerHTML = `<label>${spec.label}</label>`;
-        let ctl;
-        if (spec.type === 'date') {
-            ctl = document.createElement('input');
-            ctl.type = 'date';
-        } else {
-            ctl = document.createElement('select');
-            spec.options.forEach(o => {
-                const opt = document.createElement('option');
-                if (typeof o === 'string') { opt.value = o; opt.textContent = o || '— Any —'; }
-                else                       { opt.value = o.v; opt.textContent = o.l; }
-                ctl.appendChild(opt);
-            });
-        }
-        ctl.id = 'f_' + key;
-        ctl.dataset.key = key;
-        wrap.appendChild(ctl);
-        F.appendChild(wrap);
-    });
-    document.getElementById('filter-count').textContent =
-        `${CURRENT.filters.length} filter${CURRENT.filters.length === 1 ? '' : 's'} available`;
-}
-
-function getFilters() {
-    const f = {};
-    document.querySelectorAll('[id^="f_"]').forEach(el => {
-        if (el.value !== '' && el.value != null) f[el.dataset.key] = el.value;
-    });
-    return f;
-}
-
-/* ============================================================
-   Run report
-   ============================================================ */
-async function runReport() {
-    if (!CURRENT) return;
-    const f = getFilters();
-    const qs = new URLSearchParams(f).toString();
-    const out = document.getElementById('report-output');
-    out.innerHTML = '<div class="report-page"><div class="loader"><div class="spinner"></div>Running query…</div></div>';
-    setDownloadEnabled(false);
-    try {
-        const r = await fetch(API(`/api/reports/${CURRENT.id}?${qs}`));
-        const data = await r.json();
-        renderReport(data, f);
-        setDownloadEnabled(true);
-        const now = new Date();
-        document.getElementById('last-run').textContent =
-            `Last run · ${now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
-    } catch (e) {
-        out.innerHTML = '<div class="report-page"><div class="empty">Error: ' + e.message + '</div></div>';
-    }
-}
-
-/* ============================================================
-   Cleanup any prior charts before re-render
-   ============================================================ */
-function destroyCharts() {
-    Object.values(CHARTS).forEach(c => { try { c.destroy(); } catch(e) {} });
-    for (const k in CHARTS) delete CHARTS[k];
-}
-
-/* ============================================================
-   Master report renderer — PDF-style sectioned layout
-   ============================================================ */
-function renderReport(data, appliedFilters) {
-    destroyCharts();
-    const out = document.getElementById('report-output');
-
-    const cfg = REPORT_CONFIG[CURRENT.id] || {};
-    const num = (CURRENT.title.match(/^(\d+)\./)?.[1] || '').padStart(2, '0');
-    const cleanTitle = CURRENT.title.replace(/^\d+\.\s*/, '');
-
-    const rows = data.rows || [];
-    const summary = data.summary || {};
-    const ctx = { rows, summary, filters: appliedFilters || {}, meta: data.meta, raw: data };
-
-    /* ── Header band ── */
-    const sub = cfg.subtitle ? cfg.subtitle(ctx) : (data.meta.description || '');
-    const scope = cfg.scope ? cfg.scope(ctx) : 'Sales Finance & Network Operations';
-
-    let html = `<div class="report-page">`;
-    html += `
-        <div class="title-band">
-            <div class="eyebrow">${num} — ${cleanTitle}</div>
-            <h2 class="display">${cfg.heroTitle ? cfg.heroTitle(ctx) : cleanTitle}</h2>
-            <div class="sub">${sub}</div>
+    const params = new URLSearchParams(qs());
+    body.innerHTML = `
+      <div class="filter-card">
+        <div class="fc-head">
+          <h4>${def.title}</h4>
+          <span style="color:var(--mute); font-size:12px;">${def.description}</span>
         </div>
-        <div class="scope-strip">
-            <div class="sl"><span>Scope:</span> ${scope}</div>
-            <div class="sr"><span>Issued:</span> ${todayLong()}</div>
-        </div>
-    `;
-
-    /* ── KPI tiles ── */
-    const kpis = cfg.kpis ? cfg.kpis(ctx) : defaultKpis(ctx);
-    if (kpis && kpis.length) {
-        html += `<div class="kpi-band">`;
-        kpis.forEach(k => {
-            const subClass = k.subTone === 'warn' ? ' warn' : k.subTone === 'neg' ? ' neg' : '';
-            html += `
-                <div class="kpi">
-                    <div class="kpi-key">${k.label}</div>
-                    <div class="kpi-val">${k.value}</div>
-                    ${k.sub ? `<div class="kpi-sub${subClass}">${k.sub}</div>` : ''}
+        <div class="filter-grid">
+          ${def.filters.map(f => {
+              const spec = filterSpec[f];
+              if (!spec) return '';
+              const cur = params.get(f) || '';
+              return `
+                <div>
+                  <label>${spec.label}</label>
+                  <select data-filter="${f}">
+                    ${spec.options.map(o => `<option value="${o.v}" ${o.v === cur ? 'selected' : ''}>${o.l}</option>`).join('')}
+                  </select>
                 </div>`;
-        });
-        html += `</div>`;
-    }
-
-    /* ── Custom heatmap (Report 8) ── */
-    if (data.meta.viz === 'heatmap' && data.heatmap) {
-        html += renderHeatmapHtml(data);
-    }
-
-    /* ── 1. Headline / Chart section ── */
-    if (rows.length) {
-        const headline = cfg.headline || { title: 'Headline Metrics', kind: 'bar' };
-        html += `<div class="section">
-            <h3>1. ${headline.title}</h3>`;
-        if (headline.kind !== 'none') {
-            html += `<div class="chart-wrap"><canvas id="chart-1"></canvas></div>`;
-        }
-        html += `</div>`;
-    }
-
-    /* ── 2. Detail table ── */
-    if (rows.length) {
-        const cols = data.meta.columns;
-        html += `<div class="section">
-            <h3>2. ${cfg.tableTitle || 'Detailed Breakdown'}</h3>
-            <div class="tbl-wrap"><table class="report-table"><thead><tr>`;
-        cols.forEach(c => html += `<th>${c.label}</th>`);
-        html += `</tr></thead><tbody>`;
-        rows.forEach(r => {
-            html += `<tr>`;
-            cols.forEach(c => {
-                const fn = FMT[c.fmt] || FMT.text;
-                html += `<td>${fn(r[c.key])}</td>`;
-            });
-            html += `</tr>`;
-        });
-        html += `</tbody></table></div></div>`;
-    } else {
-        html += `<div class="section"><div class="empty">No rows match these filters.</div></div>`;
-    }
-
-    /* ── 3. Findings ── */
-    const findings = cfg.findings ? cfg.findings(ctx) : defaultFindings(ctx);
-    if (findings && findings.length) {
-        html += `<div class="section">
-            <h3>3. Findings</h3>
-            <div class="findings"><ul>${findings.map(f => `<li>${f}</li>`).join('')}</ul></div>
-        </div>`;
-    }
-
-    /* ── 4. Recommendations ── */
-    const recs = cfg.recommendations ? cfg.recommendations(ctx) : defaultRecommendations(ctx);
-    if (recs && recs.length) {
-        html += `<div class="section">
-            <h3>4. Recommendations</h3>
-            <div class="recommendations"><ol>${recs.map(r => `<li>${r}</li>`).join('')}</ol></div>
-        </div>`;
-    }
-
-    /* ── PDF-style footer ── */
-    html += `
-        <div class="report-foot">
-            <span>Skoda India — Sales Claims & Payouts MIS &nbsp;|&nbsp; Confidential — Internal use only</span>
-            <span>${rows.length} row${rows.length === 1 ? '' : 's'}</span>
+          }).join('')}
         </div>
-    </div>`;
+        <div class="action-row">
+          <button class="btn-primary" id="run-report">Run report</button>
+          <button class="btn-secondary" onclick="window.open(API_BASE + '/api/reports/${id}/download?${params.toString()}&format=xlsx')">Download Excel</button>
+          <button class="btn-secondary" onclick="window.open(API_BASE + '/api/reports/${id}/download?${params.toString()}&format=csv')">Download CSV</button>
+        </div>
+      </div>
+      <div id="report-result"></div>
+    `;
+    document.getElementById('run-report').onclick = runReport;
+    await runReport();
 
-    out.innerHTML = html;
-
-    /* ── Now render the chart canvas if present ── */
-    if (rows.length) {
-        const headline = cfg.headline || { kind: 'bar' };
-        if (headline.kind && headline.kind !== 'none') {
-            const ctxCanvas = document.getElementById('chart-1');
-            if (ctxCanvas) renderHeadlineChart(ctxCanvas, ctx, headline);
-        }
-    }
-
-    /* ── Heatmap doughnut for Report 8 ── */
-    if (data.meta.viz === 'heatmap' && data.root_causes && data.root_causes.length) {
-        renderRootCauseChart(data.root_causes);
-    }
-}
-
-/* ============================================================
-   Default KPI / findings / recs (used if a report has no override)
-   ============================================================ */
-function defaultKpis({ rows, summary }) {
-    const out = [{ label: 'Rows', value: FMT.int(rows.length) }];
-    Object.entries(summary).slice(0, 3).forEach(([k, v]) => {
-        const isCurrency = typeof v === 'number' && /amount|payout|exposure|leakage|settle/i.test(k);
-        out.push({
-            label: titleCase(k),
-            value: typeof v === 'number'
-                ? (isCurrency ? inrCr(v) : FMT.int(v))
-                : String(v ?? '—')
+    async function runReport() {
+        const result = document.getElementById('report-result');
+        result.innerHTML = `<div class="empty"><span class="spinner"></span>Running…</div>`;
+        const p = new URLSearchParams();
+        document.querySelectorAll('.filter-card select').forEach(s => {
+            if (s.value) p.set(s.dataset.filter, s.value);
         });
-    });
-    return out;
-}
-function defaultFindings({ rows, summary }) {
-    const out = [];
-    if (rows.length) out.push(`Generated <b>${rows.length}</b> data points across the selected scope.`);
-    Object.entries(summary).slice(0, 3).forEach(([k, v]) => {
-        if (typeof v === 'number') {
-            const isCurrency = /amount|payout|exposure|leakage|settle/i.test(k);
-            out.push(`<b>${titleCase(k)}:</b> ${isCurrency ? inrCr(v) : FMT.int(v)}.`);
-        }
-    });
-    return out;
-}
-function defaultRecommendations() {
-    return [
-        'Schedule a monthly review with Sales Finance and Network Operations.',
-        'Cross-check outliers against the Documentation Quality Index report.',
-        'Export to Excel and circulate to regional managers for action.'
-    ];
+        // also apply global filters
+        if (STATE.period && !p.get('period_yyyymm')) p.set('period_yyyymm', STATE.period);
+        if (STATE.zone && !p.get('zone'))            p.set('zone', STATE.zone);
+
+        const data = await fetchJson(`/api/reports/${id}?${p.toString()}`);
+        const cols = def.columns || data.meta.columns;
+        result.innerHTML = `
+          <div class="panel full">
+            <div class="panel-head">
+              <h3>${data.meta.title}</h3>
+              <span class="p-sub">${data.rows.length} rows</span>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>${cols.map(c => `<th class="${c.fmt === 'inr' || c.fmt === 'int' || c.fmt === 'num' || c.fmt === 'pct' ? 'num' : ''}">${c.label}</th>`).join('')}</tr>
+                </thead>
+                <tbody>
+                  ${data.rows.length ? data.rows.map(row => `
+                    <tr>${cols.map(c => `<td class="${c.fmt === 'inr' || c.fmt === 'int' || c.fmt === 'num' || c.fmt === 'pct' ? 'num' : ''}">${fmt[c.fmt] ? fmt[c.fmt](row[c.key]) : (row[c.key] ?? '—')}</td>`).join('')}</tr>
+                  `).join('') : '<tr><td colspan="99" class="empty">No rows.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+    }
 }
 
-/* ============================================================
-   Headline chart renderer (bar / hbar / mixed)
-   ============================================================ */
-function renderHeadlineChart(canvas, ctx, headline) {
-    const c2d = canvas.getContext('2d');
-    const labels = ctx.rows.slice(0, 12).map(r => String(r[headline.labelKey || ctx.meta.columns[0].key] || ''));
-
-    const datasets = (headline.series || [
-        { key: ctx.meta.columns.find(c => c.fmt === 'inr')?.key
-              || ctx.meta.columns.find(c => c.fmt === 'int')?.key
-              || ctx.meta.columns.find(c => c.fmt === 'pct')?.key,
-          label: 'Value', color: '#2f9e44' }
-    ]).map(s => ({
-        label: s.label,
-        data: ctx.rows.slice(0, 12).map(r => Number(r[s.key]) || 0),
-        backgroundColor: s.color,
-        borderColor: s.color,
-        borderRadius: 4,
-        barPercentage: 0.8,
-        categoryPercentage: 0.7
-    }));
-
-    CHARTS.headline = new Chart(c2d, {
-        type: headline.kind === 'hbar' ? 'bar' : 'bar',
-        data: { labels, datasets },
+/* ==========================================================
+   Chart helpers
+========================================================== */
+function bar(canvasId, labels, series, opts = {}) {
+    const ctx = document.getElementById(canvasId);
+    if (!ctx) return;
+    CHARTS[canvasId] = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: series.map((s, i) => ({
+                label: s.label,
+                data: s.data,
+                backgroundColor: s.color || CHART_COLORS[i % CHART_COLORS.length],
+                borderRadius: 6,
+                barPercentage: 0.75,
+                categoryPercentage: 0.75
+            }))
+        },
         options: {
-            indexAxis: headline.kind === 'hbar' ? 'y' : 'x',
-            responsive: true, maintainAspectRatio: false,
+            indexAxis: opts.horizontal ? 'y' : 'x',
+            responsive: true,
+            maintainAspectRatio: false,
             plugins: {
-                legend: { display: datasets.length > 1, position: 'top', labels: { color: '#0e0f0c', font: { size: 12, weight: '600' } } },
+                legend: { position: 'top', labels: { font: { size: 11 }, boxWidth: 10 } },
                 tooltip: {
-                    backgroundColor: '#0e0f0c', titleColor: '#9fe870',
-                    titleFont: { weight: '600' }, cornerRadius: 8, padding: 10
+                    callbacks: {
+                        label: ctx => `${ctx.dataset.label}: ${inrShort(ctx.parsed[opts.horizontal ? 'x' : 'y'])}`
+                    }
                 }
             },
             scales: {
-                x: { ticks: { color: '#454745', font: { size: 11 } }, grid: { display: headline.kind === 'hbar', color: '#e8ebe6' } },
-                y: { ticks: { color: '#454745', font: { size: 11 },
-                              callback: v => v >= 1e7 ? (v/1e7).toFixed(1) + ' Cr'
-                                           : v >= 1e5 ? (v/1e5).toFixed(1) + ' L'
-                                           : v >= 1e3 ? (v/1e3).toFixed(0) + 'k' : v
-                            },
-                      grid: { color: '#e8ebe6' } }
+                x: { ticks: { font: { size: 10 }, callback: v => opts.horizontal ? inrShort(v) : v } },
+                y: { ticks: { font: { size: 10 }, callback: v => opts.horizontal ? v : inrShort(v) } }
             }
         }
     });
 }
 
-/* ============================================================
-   Heatmap (Report 8) — green-scale matrix + doughnut
-   ============================================================ */
-function heatColor(value, max) {
-    if (!value || value <= 0) return '#e8ebe6';
-    const t = Math.min(1, value / Math.max(1, max));
-    // pale-yellow → primary-pale → primary → ink-deep (forest)
-    const stops = [
-        { p: 0.00, r: 255, g: 252, b: 232 },
-        { p: 0.30, r: 197, g: 237, b: 171 },
-        { p: 0.65, r: 46,  g: 173, b: 75  },
-        { p: 1.00, r: 5,   g: 77,  b: 40  }
-    ];
-    let lo = stops[0], hi = stops[stops.length - 1];
-    for (let i = 0; i < stops.length - 1; i++) {
-        if (t >= stops[i].p && t <= stops[i + 1].p) { lo = stops[i]; hi = stops[i + 1]; break; }
-    }
-    const k = (t - lo.p) / Math.max(0.0001, hi.p - lo.p);
-    const r = Math.round(lo.r + (hi.r - lo.r) * k);
-    const g = Math.round(lo.g + (hi.g - lo.g) * k);
-    const b = Math.round(lo.b + (hi.b - lo.b) * k);
-    return `rgb(${r},${g},${b})`;
-}
-
-function renderHeatmapHtml(data) {
-    const { regions, scheme_types, cells, max } = data.heatmap;
-    let html = `<div class="section"><h3>1. Region × Scheme-Type Dispute Heatmap</h3>
-        <div class="heatmap-card">
-        <table class="heatmap"><thead><tr><th></th>`;
-    scheme_types.forEach(st => html += `<th>${st.replace('_', ' ')}</th>`);
-    html += `</tr></thead><tbody>`;
-    regions.forEach(region => {
-        html += `<tr><th class="row-head">${region}</th>`;
-        scheme_types.forEach(st => {
-            const cell = cells[`${region}::${st}`];
-            const disputes = cell?.disputes || 0;
-            const days = cell?.avg_resolution_days;
-            const bg = heatColor(disputes, max);
-            const isEmpty = !cell;
-            html += `<td><div class="heat-cell ${isEmpty ? 'empty' : ''}" style="background:${bg}" title="${region} × ${st} — ${disputes} disputes${days ? ' · ' + days + ' day resolve' : ''}">
-                ${isEmpty ? '—' : disputes}
-                ${days ? `<span class="hc-meta">${days}d resolve</span>` : ''}
-            </div></td>`;
-        });
-        html += `</tr>`;
-    });
-    html += `</tbody></table>
-        <div class="heatmap-legend"><span>Low</span><div class="gradient"></div><span>High (${max})</span></div>
-        </div>`;
-
-    if (data.root_causes && data.root_causes.length) {
-        html += `<h3 style="margin-top:24px">2. Root-Cause Distribution</h3>
-            <div class="chart-wrap"><canvas id="rootcause-chart"></canvas></div>`;
-    }
-    html += `</div>`;
-    return html;
-}
-
-function renderRootCauseChart(causes) {
-    const ctx = document.getElementById('rootcause-chart');
+function doughnut(canvasId, labels, data, opts = {}) {
+    const ctx = document.getElementById(canvasId);
     if (!ctx) return;
-    const palette = ['#2f9e44', '#9fe870', '#163300', '#2766c8', '#ffc091', '#d03238', '#a855f7'];
-    CHARTS.rootcause = new Chart(ctx.getContext('2d'), {
+    const colors = opts.colors || labels.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]);
+    CHARTS[canvasId] = new Chart(ctx, {
         type: 'doughnut',
         data: {
-            labels: causes.map(c => c.cause),
+            labels,
             datasets: [{
-                data: causes.map(c => c.cnt),
-                backgroundColor: causes.map((_, i) => palette[i % palette.length]),
-                borderColor: '#fff',
+                data,
+                backgroundColor: colors,
                 borderWidth: 2,
-                hoverOffset: 8
+                borderColor: '#fff'
             }]
         },
         options: {
-            responsive: true, maintainAspectRatio: false,
-            cutout: '62%',
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '58%',
             plugins: {
-                legend: { position: 'right', labels: { font: { size: 12, weight: '600' }, color: '#0e0f0c', boxWidth: 12, padding: 10 } },
-                tooltip: {
-                    backgroundColor: '#0e0f0c', titleColor: '#9fe870', cornerRadius: 8, padding: 10,
-                    callbacks: {
-                        label: (c) => {
-                            const total = c.dataset.data.reduce((s, v) => s + v, 0);
-                            const pct = ((c.parsed / total) * 100).toFixed(1);
-                            return `${c.label}: ${c.parsed} (${pct}%)`;
+                legend: {
+                    position: 'right',
+                    labels: {
+                        font: { size: 11 },
+                        boxWidth: 10,
+                        generateLabels: chart => {
+                            const dset = chart.data.datasets[0];
+                            const total = dset.data.reduce((s,v)=>s+v,0) || 1;
+                            return chart.data.labels.map((label, i) => ({
+                                text: `${label.length > 22 ? label.slice(0,22) + '…' : label} — ${((dset.data[i]/total)*100).toFixed(0)}%`,
+                                fillStyle: colors[i],
+                                strokeStyle: '#fff',
+                                lineWidth: 1,
+                                index: i
+                            }));
                         }
+                    }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => `${ctx.label}: ${inrShort(ctx.parsed)} (${((ctx.parsed / ctx.dataset.data.reduce((s,v)=>s+v,0)) * 100).toFixed(1)}%)`
                     }
                 }
             }
@@ -1189,482 +1196,10 @@ function renderRootCauseChart(causes) {
     });
 }
 
-/* ============================================================
-   Per-report config: hero subtitle, scope, KPIs, headline chart,
-   table title, findings, recommendations.
-   Each function receives ({ rows, summary, filters, meta }).
-   ============================================================ */
-const REPORT_CONFIG = {
-
-    /* ───────── 1. Claims Efficiency Report ───────── */
-    claims_efficiency: {
-        heroTitle: ({ filters }) => `Claims Efficiency — ${filters.region ? filters.region + ' Region' : 'Pan-India'}`,
-        subtitle: () => 'All schemes (Corporate, Exchange, Loyalty, Retail) — Tactical + Base payouts',
-        scope: () => 'Sales Finance & Network Operations',
-        kpis: ({ rows, summary }) => {
-            const totalClaims = summary.total_claims || 0;
-            const totalPayout = summary.total_payout || 0;
-            const approved = rows.reduce((s, r) => s + (r.claims_approved || 0), 0);
-            const approvalRate = totalClaims ? (approved / totalClaims * 100) : 0;
-            const perClaim = totalClaims ? Math.round(totalPayout / totalClaims) : 0;
-            return [
-                { label: 'Claims raised',   value: FMT.int(totalClaims) },
-                { label: 'Approved payout', value: inrCr(totalPayout) },
-                { label: 'Approval rate',   value: approvalRate.toFixed(1) + '%' },
-                { label: 'Avg payout / claim', value: FMT.int(perClaim) }
-            ];
-        },
-        headline: {
-            title: 'Efficiency Index by Group',
-            kind: 'hbar',
-            labelKey: 'group_label',
-            series: [{ key: 'payout_per_claim', label: 'INR per claim', color: '#2f9e44' }]
-        },
-        tableTitle: 'Group Breakdown',
-        findings: ({ rows, summary }) => {
-            const f = [];
-            if (summary.low_eff_groups) f.push(`<b>${summary.low_eff_groups}</b> group${summary.low_eff_groups === 1 ? '' : 's'} flagged as <b>low efficiency</b> — review approval discipline.`);
-            const top = [...rows].sort((a, b) => (b.payout_per_claim || 0) - (a.payout_per_claim || 0))[0];
-            if (top) f.push(`Highest efficiency: <b>${top.group_label}</b> at ${FMT.inr(top.payout_per_claim)} per claim.`);
-            const worst = [...rows].sort((a, b) => (a.approval_rate || 0) - (b.approval_rate || 0))[0];
-            if (worst) f.push(`Lowest approval: <b>${worst.group_label}</b> at ${(worst.approval_rate || 0).toFixed(1)}%.`);
-            f.push(`Total approved payout this scope: <b>${inrCr(summary.total_payout || 0)}</b>.`);
-            return f;
-        },
-        recommendations: () => [
-            'Trigger <b>dealer-level documentation refresh</b> for the bottom-10 cohort.',
-            'Tighten <b>Year-End Clearance</b> rules — enforce per-dealer cap or pre-approval gate.',
-            'Move <b>Exchange Bonus</b> to a pre-validated chassis-list model.',
-            'Establish a <b>monthly Efficiency Index review</b> with Network Ops at the dealer-tier level.'
-        ]
-    },
-
-    /* ───────── 2. Dealer Behavior & Risk Profiling ───────── */
-    dealer_risk: {
-        heroTitle: () => 'Dealer Risk Tiering — Pan-India',
-        subtitle: ({ rows }) => `${rows.length} dealerships rated · Composite risk score (0–100)`,
-        scope: () => 'Network Operations & Internal Audit',
-        kpis: ({ rows, summary }) => {
-            const total = rows.length;
-            const pct = (n) => total ? ((n / total) * 100).toFixed(1) + '%' : '0%';
-            return [
-                { label: 'Active dealers', value: FMT.int(total), sub: 'in scope' },
-                { label: 'Low risk',    value: FMT.int(summary.low || 0),    sub: pct(summary.low || 0) },
-                { label: 'Medium risk', value: FMT.int(summary.medium || 0), sub: pct(summary.medium || 0), subTone: 'warn' },
-                { label: 'High risk',   value: FMT.int(summary.high || 0),   sub: pct(summary.high || 0),   subTone: 'neg' }
-            ];
-        },
-        headline: {
-            title: 'Tier Distribution & Repeat Rejection Volume',
-            kind: 'bar',
-            labelKey: 'dealer_name',
-            series: [
-                { key: 'rejection_pct',     label: 'Rejection %',       color: '#2f9e44' },
-                { key: 'repeat_rejections', label: 'Repeat rejections', color: '#2766c8' }
-            ]
-        },
-        tableTitle: 'Dealer Risk Watchlist',
-        findings: ({ rows, summary }) => {
-            const f = [];
-            const high = rows.filter(r => r.risk_band === 'HIGH');
-            if (high.length) f.push(`<b>${high.length}</b> dealers in <b>HIGH</b> risk band — escalate to Network Council.`);
-            const worstDoc = [...rows].sort((a, b) => (a.avg_doc_score || 100) - (b.avg_doc_score || 100))[0];
-            if (worstDoc) f.push(`Lowest documentation score: <b>${worstDoc.dealer_name}</b> at ${(worstDoc.avg_doc_score || 0).toFixed(1)} / 100.`);
-            const repeats = [...rows].sort((a, b) => (b.repeat_rejections || 0) - (a.repeat_rejections || 0))[0];
-            if (repeats && repeats.repeat_rejections) f.push(`Highest repeat-rejection volume: <b>${repeats.dealer_name}</b> with ${repeats.repeat_rejections} repeat rejections.`);
-            f.push(`Net distribution — Low ${summary.low || 0} · Medium ${summary.medium || 0} · High ${summary.high || 0}.`);
-            return f;
-        },
-        recommendations: () => [
-            'Mandatory <b>documentation training</b> for all HIGH-risk dealers within 30 days; non-compliance triggers scheme suspension.',
-            'Activate <b>on-site audit at top 5 high-risk dealers</b> within 30 days.',
-            'Tie <b>dealer council voting weight</b> to risk tier — high-risk dealers temporarily ineligible.',
-            'Move <b>repeat-rejection auto-flag</b> to the claims portal — block third submission of same chassis.',
-            'Quarterly tier re-grade with public ranking inside the dealer portal.'
-        ]
-    },
-
-    /* ───────── 3. Claim Aging vs Payout Leakage ───────── */
-    aging_leakage: {
-        heroTitle: () => 'Claim Aging Buckets & Leakage Exposure',
-        subtitle: () => 'All open and closed claims | Tactical + Base',
-        scope: () => 'CFO Office, Sales Finance, Network Operations',
-        kpis: ({ rows, summary }) => {
-            const openCount = rows.reduce((s, r) => s + (r.claims_count || 0), 0);
-            const openValue = summary.total_at_risk || 0;
-            const leakage   = summary.total_leakage || 0;
-            const aged90 = rows.filter(r => /^(61|9|12|>)/.test(r.aging_bucket)).reduce((s, r) => s + (r.amount_at_risk || 0), 0);
-            const pctAged = openValue ? ((aged90 / openValue) * 100).toFixed(0) + '%' : '0%';
-            return [
-                { label: 'Open claims',     value: FMT.int(openCount) },
-                { label: 'Open value',      value: inrCr(openValue), sub: 'Tactical + Base' },
-                { label: 'Leakage exposure',value: inrCr(leakage), subTone: 'neg', sub: 'time-barred' },
-                { label: 'Aged > 60 days',  value: pctAged, subTone: 'warn', sub: 'of open value' }
-            ];
-        },
-        headline: {
-            title: 'Aging Buckets — Volume vs Value',
-            kind: 'bar',
-            labelKey: 'aging_bucket',
-            series: [
-                { key: 'claims_count',   label: 'Open claims',  color: '#2f9e44' },
-                { key: 'amount_at_risk', label: 'Open value',   color: '#2766c8' }
-            ]
-        },
-        tableTitle: 'Aging Bucket Breakdown',
-        findings: ({ rows, summary }) => {
-            const f = [];
-            f.push(`Total amount at risk: <b>${inrCr(summary.total_at_risk || 0)}</b> against realised leakage of <b>${inrCr(summary.total_leakage || 0)}</b>.`);
-            const oldest = rows.find(r => /90\+|>/.test(r.aging_bucket));
-            if (oldest) f.push(`<b>${oldest.aging_bucket}</b> bucket holds ${FMT.int(oldest.claims_count)} claims worth ${inrCr(oldest.amount_at_risk)} — high write-off probability.`);
-            const peak = [...rows].sort((a, b) => (b.amount_at_risk || 0) - (a.amount_at_risk || 0))[0];
-            if (peak) f.push(`Largest bucket by value: <b>${peak.aging_bucket}</b> at ${inrCr(peak.amount_at_risk)}.`);
-            return f;
-        },
-        recommendations: ({ summary }) => [
-            `<b>Provision ${inrCr((summary.total_at_risk || 0) * 0.7)}</b> for the quarter — conservative against ${inrCr(summary.total_at_risk || 0)} exposure.`,
-            'Initiate <b>closure sprint for >90-day bucket</b> within 30 days, owned by Regional Heads.',
-            'Hard SLA at <b>45 days</b> for Tactical and Year-End — auto-flag past 60 days.',
-            'Activate a <b>dealer-level leakage scorecard</b>; tie 10% of tactical payout to closure discipline.'
-        ]
-    },
-
-    /* ───────── 4. Scheme Effectiveness & Region Dashboard ───────── */
-    scheme_effectiveness: {
-        heroTitle: () => 'Scheme Effectiveness & Region Dashboard',
-        subtitle: () => 'Scheme-wise claim volume vs payout · Region comparison',
-        scope: () => 'Sales Strategy & Regional Ops',
-        kpis: ({ rows, summary }) => {
-            const totalPayout = rows.reduce((s, r) => s + (r.approved_amount || 0), 0);
-            const totalClaims = rows.reduce((s, r) => s + (r.claims_count || 0), 0);
-            return [
-                { label: 'Schemes',       value: FMT.int(summary.schemes || 0) },
-                { label: 'Avg achievement', value: (summary.avg_achievement || 0) + '%',
-                  subTone: (summary.avg_achievement || 0) >= 80 ? '' : (summary.avg_achievement || 0) >= 50 ? 'warn' : 'neg' },
-                { label: 'Approved payout', value: inrCr(totalPayout) },
-                { label: 'Claims',          value: FMT.int(totalClaims) }
-            ];
-        },
-        headline: {
-            title: 'Achievement % by Scheme × Region',
-            kind: 'hbar',
-            labelKey: 'scheme_name',
-            series: [{ key: 'achievement_pct', label: 'Achievement %', color: '#2f9e44' }]
-        },
-        tableTitle: 'Scheme × Region Detail',
-        findings: ({ rows, summary }) => {
-            const f = [];
-            const top = [...rows].sort((a, b) => (b.achievement_pct || 0) - (a.achievement_pct || 0))[0];
-            if (top) f.push(`Top performer: <b>${top.scheme_name}</b> in ${top.region} at ${(top.achievement_pct || 0).toFixed(1)}% of target.`);
-            const under = rows.filter(r => r.roi_score === 'UNDERPERFORMING');
-            if (under.length) f.push(`<b>${under.length}</b> scheme-region combinations are <b>underperforming</b> against target.`);
-            f.push(`Average achievement across the portfolio: <b>${summary.avg_achievement || 0}%</b>.`);
-            return f;
-        },
-        recommendations: () => [
-            'Reallocate marketing spend from <b>UNDERPERFORMING</b> schemes to high-ROI tactical campaigns.',
-            'Run a <b>festive-quarter pulse</b> in regions trailing &lt; 50% achievement.',
-            'Move <b>Loyalty + Exchange</b> targets to a rolling 90-day basis to reduce Q-end gaming.',
-            'Publish a <b>scheme effectiveness leaderboard</b> in the regional dealer portal.'
-        ]
-    },
-
-    /* ───────── 5. Predictive & Provision Forecast ───────── */
-    forecast: {
-        heroTitle: () => 'Predictive Provision Forecast — Next 6 Months',
-        subtitle: () => 'Trend-based forecast · Bonus & Tactical · Provisioning adequacy',
-        scope: () => 'CFO Office & Treasury',
-        kpis: ({ rows, summary }) => {
-            const totalForecast = rows.reduce((s, r) => s + (r.forecast_amount || 0), 0);
-            const totalProvision = rows.reduce((s, r) => s + (r.provision_required || 0), 0);
-            const inadequate = rows.filter(r => r.adequacy_flag === 'INCREASE').length;
-            return [
-                { label: 'Next quarter forecast', value: inrCr(summary.next_quarter_total || 0) },
-                { label: '6-month forecast',      value: inrCr(totalForecast) },
-                { label: 'Provision required',    value: inrCr(totalProvision), sub: '+10% buffer' },
-                { label: 'Periods needing increase', value: FMT.int(inadequate), subTone: 'warn' }
-            ];
-        },
-        headline: {
-            title: 'Forecast Payout vs Provisioning',
-            kind: 'bar',
-            labelKey: 'period',
-            series: [
-                { key: 'forecast_amount',    label: 'Forecast payout',    color: '#2f9e44' },
-                { key: 'provision_required', label: 'Provision required', color: '#2766c8' }
-            ]
-        },
-        tableTitle: 'Period × Kind Forecast',
-        findings: ({ rows }) => {
-            const f = [];
-            const peak = [...rows].sort((a, b) => (b.forecast_amount || 0) - (a.forecast_amount || 0))[0];
-            if (peak) f.push(`Peak forecast period: <b>${peak.period}</b> (${peak.kind}) at ${inrCr(peak.forecast_amount)}.`);
-            const tactical = rows.filter(r => r.kind === 'TACTICAL');
-            const base = rows.filter(r => r.kind === 'BASE');
-            const tSum = tactical.reduce((s, r) => s + (r.forecast_amount || 0), 0);
-            const bSum = base.reduce((s, r) => s + (r.forecast_amount || 0), 0);
-            f.push(`6-month split — Tactical: <b>${inrCr(tSum)}</b> · Base: <b>${inrCr(bSum)}</b>.`);
-            const inc = rows.filter(r => r.adequacy_flag === 'INCREASE').length;
-            if (inc) f.push(`<b>${inc}</b> period(s) flagged as <b>INCREASE</b> — provisioning needs uplift vs historical norm.`);
-            return f;
-        },
-        recommendations: () => [
-            'Lock provisioning for next 2 quarters at the <b>+10% buffer</b> level.',
-            'Re-forecast monthly during festive quarters (Q3/Q4) — variance band ±15%.',
-            'Pre-fund <b>Tactical</b> separately from <b>Base</b> to avoid cross-pool leakage.',
-            'Share forecast with Treasury 30 days before each quarter for cash-flow alignment.'
-        ]
-    },
-
-    /* ───────── 6. Documentation Quality Index (DQI) ───────── */
-    dqi: {
-        heroTitle: () => 'Documentation Quality Index (DQI)',
-        subtitle: () => 'Dealer-level documentation completeness scoring · Top documentation gaps',
-        scope: () => 'Network Operations & Training',
-        kpis: ({ rows, summary }) => {
-            const avgDqi = rows.length ? (rows.reduce((s, r) => s + (r.avg_score || 0), 0) / rows.length) : 0;
-            const avgDays = rows.filter(r => r.avg_approval_days != null).reduce((s, r, _, arr) => s + r.avg_approval_days / arr.length, 0);
-            return [
-                { label: 'Dealers evaluated', value: FMT.int(rows.length) },
-                { label: 'Avg DQI score',     value: avgDqi.toFixed(1) + ' / 100', subTone: avgDqi >= 75 ? '' : 'warn' },
-                { label: 'Gold tier',         value: FMT.int(summary.gold || 0), sub: 'DQI ≥ 90' },
-                { label: 'Need coaching',     value: FMT.int(summary.coach || 0), sub: 'DQI < 60', subTone: 'neg' }
-            ];
-        },
-        headline: {
-            title: 'DQI by Dealer (Top 12)',
-            kind: 'hbar',
-            labelKey: 'dealer_name',
-            series: [{ key: 'avg_score', label: 'DQI', color: '#2f9e44' }]
-        },
-        tableTitle: 'Dealer DQI Detail',
-        findings: ({ rows, summary }) => {
-            const f = [];
-            const top = rows[0];
-            if (top) f.push(`Top DQI: <b>${top.dealer_name}</b> at ${(top.avg_score || 0).toFixed(1)} (${top.tier}).`);
-            const bot = rows[rows.length - 1];
-            if (bot) f.push(`Lowest DQI: <b>${bot.dealer_name}</b> at ${(bot.avg_score || 0).toFixed(1)} — top gap "${bot.top_gap}".`);
-            const gapMap = {};
-            rows.forEach(r => { const g = (r.top_gap || '').split(' (')[0]; if (g && g !== '—') gapMap[g] = (gapMap[g] || 0) + 1; });
-            const dominantGap = Object.entries(gapMap).sort((a, b) => b[1] - a[1])[0];
-            if (dominantGap) f.push(`Most common top gap across dealers: <b>${dominantGap[0]}</b> (${dominantGap[1]} dealers).`);
-            f.push(`Tier mix — Gold ${summary.gold || 0} · Need coaching ${summary.coach || 0}.`);
-            return f;
-        },
-        recommendations: () => [
-            'Run <b>monthly documentation refresh</b> for all dealers below DQI 75.',
-            'Auto-block claim submission when a dealer accumulates 3+ <b>INVOICE_MISSING</b> tags.',
-            'Publish DQI rankings in the dealer portal — gamify Gold tier.',
-            'Tie <b>tactical payout slab</b> to DQI band — Gold +1pp, Bronze −1pp.'
-        ]
-    },
-
-    /* ───────── 7. Dealer Lifecycle & FNF Risk Tracker ───────── */
-    fnf_tracker: {
-        heroTitle: () => 'Dealer Lifecycle & FNF Risk Tracker',
-        subtitle: () => 'Dealers nearing exit · Open claim exposure prior to FNF · Dispute pendency',
-        scope: () => 'Legal, Sales Finance, Network Operations',
-        kpis: ({ rows, summary }) => {
-            const exposure = summary.total_exposure || 0;
-            const expected = rows.reduce((s, r) => s + (r.expected_settlement || 0), 0);
-            const disputes = rows.reduce((s, r) => s + (r.disputes || 0), 0);
-            return [
-                { label: 'Dealers tracked',       value: FMT.int(rows.length) },
-                { label: 'Nearing exit',          value: FMT.int(summary.nearing_exit || 0), subTone: 'warn' },
-                { label: 'Open exposure',         value: inrCr(exposure), subTone: 'neg' },
-                { label: 'Expected settlement',   value: inrCr(expected) }
-            ];
-        },
-        headline: {
-            title: 'Open Exposure by Dealer (Top 12)',
-            kind: 'hbar',
-            labelKey: 'dealer_name',
-            series: [{ key: 'open_exposure', label: 'Exposure (INR)', color: '#d03238' }]
-        },
-        tableTitle: 'FNF Risk Watchlist',
-        findings: ({ rows, summary }) => {
-            const f = [];
-            f.push(`<b>${summary.nearing_exit || 0}</b> dealers nearing exit with combined exposure of <b>${inrCr(summary.total_exposure || 0)}</b>.`);
-            const top = [...rows].sort((a, b) => (b.open_exposure || 0) - (a.open_exposure || 0))[0];
-            if (top) f.push(`Largest single exposure: <b>${top.dealer_name}</b> at ${inrCr(top.open_exposure)} — FNF target ${top.fnf_target_date || '—'}.`);
-            const disputeHeavy = rows.filter(r => (r.disputes || 0) >= 3);
-            if (disputeHeavy.length) f.push(`<b>${disputeHeavy.length}</b> exiting dealers carry 3+ active disputes — Legal pre-clearance required.`);
-            return f;
-        },
-        recommendations: () => [
-            'Freeze <b>FNF closure</b> for dealers with open disputes &gt; 60 days.',
-            'Pre-settle the top-5 exposure dealers within 45 days at <b>85% claim value</b>.',
-            'Move FNF candidates to a <b>weekly Legal × Finance review</b> cadence.',
-            'Block fresh claim submissions from EXITED dealers automatically at the portal layer.'
-        ]
-    },
-
-    /* ───────── 8. Corporate & Exchange Dispute Heatmap ───────── */
-    dispute_heatmap: {
-        heroTitle: () => 'Corporate & Exchange Dispute Analytics',
-        subtitle: () => 'Disputes against Corporate Bulk + Exchange Bonus | Pan-India',
-        scope: () => 'Sales Leadership, Internal Audit, Legal',
-        kpis: ({ rows, summary, raw }) => {
-            const totalValue = rows.reduce((s, r) => s + ((r.dispute_count || 0) * 30000), 0);
-            const avgResolve = rows.filter(r => r.avg_resolution_days != null).reduce((s, r, _, arr) => s + r.avg_resolution_days / Math.max(1, arr.length), 0);
-            const causes = raw.root_causes || [];
-            const topCause = causes[0]?.cause || '—';
-            return [
-                { label: 'Disputes',        value: FMT.int(summary.total_disputes || 0) },
-                { label: 'Hot dealers',     value: FMT.int(summary.hot_dealers || 0), subTone: 'neg', sub: '8+ disputes each' },
-                { label: 'Avg resolution',  value: avgResolve ? avgResolve.toFixed(0) + ' days' : '—' },
-                { label: 'Top root cause',  value: topCause }
-            ];
-        },
-        headline: { kind: 'none' }, // already shown via heatmap + doughnut
-        tableTitle: '3. Dealer × Region × Scheme-Type Detail',
-        findings: ({ rows, summary, raw }) => {
-            const f = [];
-            f.push(`<b>${summary.total_disputes || 0}</b> disputes across <b>${summary.regions_affected || 0}</b> regions.`);
-            const hot = rows.filter(r => r.heat === 'HOT');
-            if (hot.length) f.push(`<b>${hot.length}</b> dealer × scheme-type cells flagged <b>HOT</b> (8+ disputes).`);
-            const causes = raw.root_causes || [];
-            if (causes.length) {
-                const top = causes[0];
-                const total = causes.reduce((s, c) => s + c.cnt, 0);
-                f.push(`Lead root cause: <b>${top.cause}</b> at ${((top.cnt / total) * 100).toFixed(1)}% of disputes.`);
-            }
-            const slowest = [...rows].sort((a, b) => (b.avg_resolution_days || 0) - (a.avg_resolution_days || 0))[0];
-            if (slowest && slowest.avg_resolution_days) f.push(`Slowest resolution: <b>${slowest.dealer_name}</b> at ${(slowest.avg_resolution_days || 0).toFixed(0)} days.`);
-            return f;
-        },
-        recommendations: () => [
-            '<b>Pre-validated chassis valuation table</b> (third-party feed) for Exchange disputes.',
-            '<b>Dedicated dispute-resolution cell</b> for Central + East regions with a 30-day SLA.',
-            '<b>Repeat-dispute auto-flag</b> — three or more on same root cause triggers an audit.',
-            'Move dispute heatmap to a <b>monthly cadence</b> with Legal + Sales co-ownership.',
-            'Pilot a <b>fast-track arbitration panel</b> for the top-10 dealers by dispute volume.'
-        ]
-    },
-
-    /* ───────── 9. Sales Enablement Impact ───────── */
-    sales_enablement: {
-        heroTitle: () => 'Sales Enablement Impact — Upfront / DAN Support',
-        subtitle: () => 'Correlation between upfront support and claim success rate · Settlement speed',
-        scope: () => 'Sales Strategy & Dealer Finance',
-        kpis: ({ rows }) => {
-            const baseline = rows.find(r => r.support_band === 'No Support');
-            const top = [...rows].sort((a, b) => (b.success_rate || 0) - (a.success_rate || 0))[0];
-            const lift = (baseline && top) ? (top.success_rate - baseline.success_rate).toFixed(1) : '—';
-            const totalDealers = rows.reduce((s, r) => s + (r.dealer_count || 0), 0);
-            const totalClaims  = rows.reduce((s, r) => s + (r.claims || 0), 0);
-            return [
-                { label: 'Bands',                value: FMT.int(rows.length) },
-                { label: 'Dealers in study',     value: FMT.int(totalDealers) },
-                { label: 'Claims observed',      value: FMT.int(totalClaims) },
-                { label: 'Best-vs-baseline lift', value: lift === '—' ? '—' : `+${lift} pp`, subTone: 'warn' }
-            ];
-        },
-        headline: {
-            title: 'Success Rate by Support Band',
-            kind: 'bar',
-            labelKey: 'support_band',
-            series: [
-                { key: 'success_rate',         label: 'Success %',           color: '#2f9e44' },
-                { key: 'avg_settlement_days',  label: 'Avg settlement (d)',  color: '#2766c8' }
-            ]
-        },
-        tableTitle: 'Support Band Detail',
-        findings: ({ rows }) => {
-            const f = [];
-            const baseline = rows.find(r => r.support_band === 'No Support');
-            const top = [...rows].sort((a, b) => (b.success_rate || 0) - (a.success_rate || 0))[0];
-            if (baseline && top && top !== baseline) {
-                f.push(`<b>${top.support_band}</b> band lifts success by <b>+${(top.success_rate - baseline.support_rate || 0).toFixed(1)} pp</b> over the No-Support baseline.`);
-            }
-            const fastest = [...rows].sort((a, b) => (a.avg_settlement_days || 0) - (b.avg_settlement_days || 0))[0];
-            if (fastest && fastest.avg_settlement_days) f.push(`Fastest settlement band: <b>${fastest.support_band}</b> at ${(fastest.avg_settlement_days || 0).toFixed(0)} days.`);
-            const negative = rows.filter(r => r.impact_signal === 'NEGATIVE');
-            if (negative.length) f.push(`<b>${negative.length}</b> band(s) show negative impact — review eligibility criteria.`);
-            return f;
-        },
-        recommendations: () => [
-            'Expand <b>1L–3L upfront support</b> — strongest cost-to-impact ratio in the data.',
-            'Pair upfront support with mandatory <b>documentation training</b> to compound the effect.',
-            'Ring-fence <b>5L+ support</b> for strategic dealers only; track a 12-month payback.',
-            'Audit dealers in the <b>No Support</b> band quarterly to surface trapped potential.'
-        ]
-    }
-};
-
-/* ============================================================
-   Boot
-   ============================================================ */
-function setDownloadEnabled(on) {
-    document.getElementById('download-csv').disabled = !on;
-    document.getElementById('download-xlsx').disabled = !on;
-    document.getElementById('download-pdf').disabled = !on;
-}
-function download(fmt) {
-    if (!CURRENT) return;
-    const f = getFilters();
-    f.format = fmt;
-    const qs = new URLSearchParams(f).toString();
-    window.location.href = API(`/api/reports/${CURRENT.id}/download?${qs}`);
-}
-
-/* ============================================================
-   PDF download — capture the full report card as a single
-   tall PDF page so nothing splits across page breaks.
-   ============================================================ */
-async function downloadPDF() {
-    if (!CURRENT) return;
-    const node = document.querySelector('#report-output .report-page');
-    if (!node) return;
-
-    const btn = document.getElementById('download-pdf');
-    const originalLabel = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Generating PDF…';
-
-    try {
-        // Render the report card to a high-DPI canvas
-        const canvas = await html2canvas(node, {
-            scale: 2,
-            backgroundColor: '#ffffff',
-            useCORS: true
-        });
-
-        // Fixed sensible page width (A4-ish portrait width in pt).
-        // Page height scales to preserve aspect ratio so everything fits
-        // edge-to-edge on a single tall page.
-        const PAGE_W = 595;                    // A4 width in pt (210 mm)
-        const MARGIN = 16;                     // small symmetric margin
-        const innerW = PAGE_W - MARGIN * 2;
-        const innerH = innerW * (canvas.height / canvas.width);
-        const PAGE_H = innerH + MARGIN * 2;
-
-        const { jsPDF } = window.jspdf;
-        const pdf = new jsPDF({
-            unit: 'pt',
-            format: [PAGE_W, PAGE_H],
-            orientation: 'portrait',
-            compress: true
-        });
-        pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', MARGIN, MARGIN, innerW, innerH);
-
-        const stamp = new Date().toISOString().slice(0, 10);
-        pdf.save(`${CURRENT.id}_${stamp}.pdf`);
-    } catch (e) {
-        alert('PDF export failed: ' + e.message);
-    } finally {
-        btn.textContent = originalLabel;
-        btn.disabled = false;
-    }
-}
-
-document.getElementById('run-btn').onclick = runReport;
-document.getElementById('reset-btn').onclick = () => { renderFilters(); };
-document.getElementById('download-csv').onclick  = () => download('csv');
-document.getElementById('download-xlsx').onclick = () => download('xlsx');
-document.getElementById('download-pdf').onclick  = downloadPDF;
-
-loadMeta();
+/* ==========================================================
+   Go
+========================================================== */
+boot();
 </script>
 </body>
 </html>

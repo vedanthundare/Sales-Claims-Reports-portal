@@ -1,41 +1,43 @@
 /**
- * SQL builders for the 9 analytical / MIS reports.
+ * Analytical queries powering the 3 role-aware dashboards + the 9 canonical
+ * reports, all against the *real* Skoda schema (dealer / retail_sale /
+ * wholesale_sale / scheme / scheme_claim_line / isac_payment_line).
  *
- * Each report exposes:
- *   - meta: title, description, columns
- *   - filters: declarative filter spec consumed by the UI
- *   - run(db, params): returns { rows, summary }
+ * A "claim" in the real data = a row in scheme_claim_line (one VIN in one
+ * scheme). Its lifecycle is derived, not stored:
  *
- * Filters supported across reports (subset per report):
- *   from              ISO date  (claim_raised_on >= from)
- *   to                ISO date  (claim_raised_on <= to)
- *   region            string
- *   zone              string
- *   dealer_code       string
- *   scheme_type       CORPORATE / EXCHANGE / LOYALTY / RETAIL_TACTICAL / BASE
- *   scheme_code       string
- *   payout_kind       BASE / TACTICAL
- *   risk_band         LOW / MEDIUM / HIGH
- *   fnf_status        ACTIVE / NEARING_EXIT / EXITED
- *   status            APPROVED / PENDING / REJECTED / TIME_BARRED / DISPUTED
+ *      calculated_amount > 0
+ *      eligibility  = YES / NO / null / <text>
+ *      matching row(s) in isac_payment_line (same scheme_code + vin)
+ *
+ *      status derived:
+ *        REJECTED  → eligibility = NO  (or explicit reject text)
+ *        APPROVED  → calculated > 0 AND matching ISAC line exists
+ *        PENDING   → calculated > 0 AND no ISAC line yet
+ *        NIL       → calculated = 0  (row exists but no payout — excluded from most reports)
  */
 
-// Build a parameterised WHERE clause from a filter object
+// -------- filter → WHERE builder --------------------------------------
+// Filters allowed:
+//   period_yyyymm     '2026-03'
+//   zone              India-I / India-II
+//   dealer_code       (normalised, e.g. 10296)
+//   scheme_code       SKSL2026M03_...
+//   scheme_type       DAN / DEMO / SC_INCENTIVE / REGIONAL_BOOSTER / LOYALTY / CORPORATE / EXCHANGE / VOLUME_BONUS / EARLY_BIRD / KODIAQ_BOOSTER
+//   scheme_kind       RETAIL / WHOLESALE
+//   model_group       Kushaq / Slavia / Kylaq / Kodiaq / Octavia
+//   status            APPROVED / PENDING / REJECTED
 function buildWhere(filters, scope) {
     const where = [];
     const params = {};
     const allow = {
-        from:        () => { where.push('c.claim_raised_on >= @from'); },
-        to:          () => { where.push('c.claim_raised_on <= @to'); },
-        region:      () => { where.push('d.region = @region'); },
-        zone:        () => { where.push('d.zone   = @zone'); },
-        dealer_code: () => { where.push('c.dealer_code = @dealer_code'); },
-        scheme_type: () => { where.push('s.scheme_type = @scheme_type'); },
-        scheme_code: () => { where.push('c.scheme_code = @scheme_code'); },
-        payout_kind: () => { where.push('c.payout_kind = @payout_kind'); },
-        risk_band:   () => { where.push('d.risk_band = @risk_band'); },
-        fnf_status:  () => { where.push('d.fnf_status = @fnf_status'); },
-        status:      () => { where.push('c.status = @status'); }
+        period_yyyymm: () => where.push('scl.period_yyyymm = @period_yyyymm'),
+        zone:          () => where.push('d.zone = @zone'),
+        dealer_code:   () => where.push('scl.dealer_code = @dealer_code'),
+        scheme_code:   () => where.push('scl.scheme_code = @scheme_code'),
+        scheme_type:   () => where.push('s.scheme_type = @scheme_type'),
+        scheme_kind:   () => where.push('s.scheme_kind = @scheme_kind'),
+        model_group:   () => where.push('scl.model_group = @model_group')
     };
     Object.keys(filters || {}).forEach(k => {
         if (filters[k] === '' || filters[k] == null) return;
@@ -47,106 +49,371 @@ function buildWhere(filters, scope) {
     return { whereSQL: where.length ? 'WHERE ' + where.join(' AND ') : '', params };
 }
 
+// Base joined-claim CTE used by most reports
+const CLAIMS_CTE = `
+    WITH paid AS (
+        SELECT scheme_code, vin, SUM(amount_payable) AS paid_amount
+          FROM isac_payment_line
+         WHERE vin IS NOT NULL
+         GROUP BY scheme_code, vin
+    ),
+    joined AS (
+        SELECT scl.id,
+               scl.scheme_code, scl.vin, scl.dealer_code, scl.dealer_short_name,
+               scl.model_code, scl.model_group,
+               scl.calculated_amount, scl.eligibility, scl.remarks, scl.period_yyyymm,
+               COALESCE(p.paid_amount, 0) AS paid_amount,
+               CASE
+                    WHEN UPPER(COALESCE(scl.eligibility,'')) = 'NO'      THEN 'REJECTED'
+                    WHEN scl.calculated_amount = 0 AND p.paid_amount IS NULL THEN 'NIL'
+                    WHEN p.paid_amount IS NOT NULL                        THEN 'APPROVED'
+                    ELSE 'PENDING'
+               END AS status,
+               s.scheme_name, s.scheme_kind, s.scheme_type, s.target_payout
+          FROM scheme_claim_line scl
+          JOIN scheme  s ON s.scheme_code = scl.scheme_code
+     LEFT JOIN dealer  d ON d.dealer_code = scl.dealer_code
+     LEFT JOIN paid    p ON p.scheme_code = scl.scheme_code AND p.vin = scl.vin
+    )
+`;
+
+// ─── Role-aware KPI endpoints ────────────────────────────────────────────
+const kpis = {
+    manager(db, filters) {
+        const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind','model_group']);
+        // Re-alias for the CTE
+        const w = whereSQL.replace(/scl\./g,'j.').replace(/^WHERE/, 'WHERE');
+        const wOrEmpty = w.replace(/j\.scheme_code/g, 'j.scheme_code')
+                          .replace(/j\.dealer_code/g, 'j.dealer_code');
+        // Include ONLY rows where a payout was calculated (calculated_amount > 0)
+        // OR where an ISAC payment landed. Zero-value lines are eligibility rejects
+        // and would swamp the counts otherwise.
+        const w2 = w
+            ? w + ' AND (j.calculated_amount > 0 OR j.paid_amount > 0)'
+            : 'WHERE (j.calculated_amount > 0 OR j.paid_amount > 0)';
+        const rows = db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT
+                COUNT(*)                             AS claim_lines,
+                COUNT(DISTINCT j.dealer_code)         AS dealers_active,
+                COUNT(DISTINCT j.scheme_code)         AS schemes_active,
+                ROUND(SUM(j.calculated_amount))       AS total_claimed,
+                ROUND(SUM(j.paid_amount))             AS total_paid,
+                ROUND(SUM(j.calculated_amount) - SUM(j.paid_amount)) AS gap,
+                ROUND(100.0 * SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS approval_rate,
+                SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) AS approved_count,
+                SUM(CASE WHEN j.status='PENDING'  THEN 1 ELSE 0 END) AS pending_count,
+                SUM(CASE WHEN j.status='REJECTED' THEN 1 ELSE 0 END) AS rejected_count
+              FROM joined j
+              LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+              LEFT JOIN scheme s ON s.scheme_code = j.scheme_code
+             ${w2}
+        `).get(params);
+        return rows || {};
+    },
+    dealer(db, filters) {
+        if (!filters.dealer_code) return null;
+        const params = { dealer_code: filters.dealer_code, period: filters.period_yyyymm || '2026-03' };
+        const info = db.prepare(`
+            SELECT d.dealer_code, d.dealer_short_name, d.dealer_name, d.zone, d.state, d.rsm,
+                   -- targets are seeded per outlet in Book2; match on short-name and
+                   -- take the max so the primary + branches share the same target.
+                   (SELECT MAX(t2.retail_target)
+                      FROM dealer_month_target t2
+                      JOIN dealer d2 ON d2.dealer_code = t2.dealer_code
+                     WHERE d2.dealer_short_name = d.dealer_short_name
+                       AND t2.period_yyyymm = @period) AS retail_target,
+                   (SELECT MAX(t2.wholesale_target)
+                      FROM dealer_month_target t2
+                      JOIN dealer d2 ON d2.dealer_code = t2.dealer_code
+                     WHERE d2.dealer_short_name = d.dealer_short_name
+                       AND t2.period_yyyymm = @period) AS wholesale_target
+              FROM dealer d
+             WHERE d.dealer_code = @dealer_code
+        `).get(params) || {};
+
+        // aggregate across all outlets sharing this dealer_short_name
+        const codesRow = db.prepare(`
+            SELECT dealer_short_name FROM dealer WHERE dealer_code = @dealer_code
+        `).get(params);
+        const shortName = codesRow ? codesRow.dealer_short_name : null;
+        const codeFilter = shortName
+            ? `IN (SELECT dealer_code FROM dealer WHERE dealer_short_name = @short)`
+            : `= @dealer_code`;
+        const p2 = { ...params, short: shortName };
+
+        const retail = db.prepare(`
+            SELECT COUNT(*) AS c FROM retail_sale
+             WHERE dealer_code ${codeFilter} AND period_yyyymm = @period
+        `).get(p2).c;
+        const ws = db.prepare(`
+            SELECT COUNT(*) AS c FROM wholesale_sale
+             WHERE dealer_code ${codeFilter} AND period_yyyymm = @period
+        `).get(p2).c;
+
+        const money = db.prepare(`
+            SELECT
+                ROUND(COALESCE(SUM(scl.calculated_amount),0)) AS claimed,
+                ROUND(COALESCE((SELECT SUM(ip.amount_payable)
+                                  FROM isac_payment_line ip
+                                 WHERE ip.dealer_code ${codeFilter}
+                                   AND ip.period_yyyymm = @period),0)) AS paid
+              FROM scheme_claim_line scl
+             WHERE scl.dealer_code ${codeFilter}
+               AND scl.period_yyyymm = @period
+               AND scl.calculated_amount > 0
+        `).get(p2) || {};
+
+        return {
+            ...info,
+            retail_sold: retail,
+            wholesale_taken: ws,
+            retail_target: info.retail_target || 0,
+            wholesale_target: info.wholesale_target || 0,
+            retail_ach_pct: info.retail_target ? Math.round(100 * retail / info.retail_target) : null,
+            wholesale_ach_pct: info.wholesale_target ? Math.round(100 * ws / info.wholesale_target) : null,
+            claimed: money.claimed || 0,
+            paid: money.paid || 0,
+            pending: (money.claimed || 0) - (money.paid || 0)
+        };
+    },
+    finance(db, filters) {
+        const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
+        const w = whereSQL.replace(/scl\./g,'j.');
+        const totals = db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT
+                ROUND(SUM(j.calculated_amount))              AS total_claimed,
+                ROUND(SUM(j.paid_amount))                    AS total_paid,
+                ROUND(SUM(j.calculated_amount - j.paid_amount)) AS gap,
+                ROUND(100.0 * SUM(j.paid_amount) / NULLIF(SUM(j.calculated_amount),0), 1) AS paid_pct
+              FROM joined j
+             ${w}
+        `).get(params) || {};
+
+        const isacTotals = db.prepare(`
+            SELECT COUNT(*) AS rfa_lines,
+                   ROUND(SUM(amount_payable)) AS isac_total,
+                   COUNT(DISTINCT scheme_code) AS rfa_count
+              FROM isac_payment_line
+             WHERE period_yyyymm = COALESCE(@period_yyyymm, period_yyyymm)
+        `).get({ period_yyyymm: filters.period_yyyymm || null });
+
+        return { ...totals, ...isacTotals };
+    }
+};
+
+// ─── Dashboard chart data ─────────────────────────────────────────────────
+const charts = {
+    topDealersByPayout(db, filters) {
+        const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
+        const w = whereSQL.replace(/scl\./g,'j.');
+        return db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer,
+                   ROUND(SUM(j.calculated_amount)) AS claimed,
+                   ROUND(SUM(j.paid_amount))       AS paid
+              FROM joined j
+         LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+             ${w}
+             GROUP BY j.dealer_code
+             ORDER BY claimed DESC
+             LIMIT 10
+        `).all(params);
+    },
+    schemeMix(db, filters) {
+        const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','model_group']);
+        const w = whereSQL.replace(/scl\./g,'j.');
+        return db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT j.scheme_name AS label,
+                   ROUND(SUM(j.calculated_amount)) AS value
+              FROM joined j
+             ${w}
+             GROUP BY j.scheme_code
+             ORDER BY value DESC
+        `).all(params);
+    },
+    zonePayout(db, filters) {
+        const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','scheme_type','scheme_kind','model_group']);
+        const w = whereSQL.replace(/scl\./g,'j.');
+        return db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT COALESCE(d.zone,'Unknown') AS zone,
+                   ROUND(SUM(j.calculated_amount)) AS claimed,
+                   ROUND(SUM(j.paid_amount))       AS paid
+              FROM joined j
+         LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+             ${w}
+             GROUP BY COALESCE(d.zone,'Unknown')
+             ORDER BY claimed DESC
+        `).all(params);
+    },
+    modelMix(db, filters) {
+        const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
+        const w = whereSQL.replace(/scl\./g,'j.');
+        return db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT COALESCE(j.model_group,'Other') AS label,
+                   ROUND(SUM(j.calculated_amount)) AS value
+              FROM joined j
+             ${w}
+             GROUP BY COALESCE(j.model_group,'Other')
+             ORDER BY value DESC
+        `).all(params);
+    },
+    statusBreakdown(db, filters) {
+        const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type','scheme_kind']);
+        const w = whereSQL.replace(/scl\./g,'j.');
+        return db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT j.status AS label, COUNT(*) AS count,
+                   ROUND(SUM(j.calculated_amount)) AS amount
+              FROM joined j
+             ${w}
+             GROUP BY j.status
+        `).all(params);
+    },
+    reconciliation(db, filters) {
+        // If dealer_code is supplied, aggregate across all outlets of the same
+        // dealer_short_name (BRITE has 6+ codes; showing one gives wrong totals).
+        let dealerCodes = null;
+        if (filters.dealer_code) {
+            const row = db.prepare('SELECT dealer_short_name FROM dealer WHERE dealer_code = ?').get(filters.dealer_code);
+            if (row && row.dealer_short_name) {
+                dealerCodes = db.prepare('SELECT dealer_code FROM dealer WHERE dealer_short_name = ?')
+                    .all(row.dealer_short_name).map(r => r.dealer_code);
+            }
+        }
+        const filters2 = { ...filters };
+        delete filters2.dealer_code;
+        const { whereSQL, params } = buildWhere(filters2, ['period_yyyymm','zone','scheme_kind','scheme_type']);
+        let w = whereSQL.replace(/scl\./g,'j.');
+        if (dealerCodes && dealerCodes.length) {
+            const placeholders = dealerCodes.map((_, i) => `@dc${i}`).join(',');
+            dealerCodes.forEach((c, i) => { params[`dc${i}`] = c; });
+            w = w ? `${w} AND j.dealer_code IN (${placeholders})`
+                  : `WHERE j.dealer_code IN (${placeholders})`;
+        }
+        return db.prepare(`
+            ${CLAIMS_CTE}
+            SELECT j.scheme_code, j.scheme_name,
+                   ROUND(SUM(j.calculated_amount)) AS claimed,
+                   ROUND(SUM(j.paid_amount))       AS paid,
+                   ROUND(SUM(j.calculated_amount - j.paid_amount)) AS gap
+              FROM joined j
+             ${w}
+             GROUP BY j.scheme_code, j.scheme_name
+            HAVING claimed > 0 OR paid > 0
+             ORDER BY claimed DESC
+        `).all(params);
+    }
+};
+
+// ═════════════════════════════════════════════════════════════════════════
+// 9 canonical reports rewritten for the real schema
+// ═════════════════════════════════════════════════════════════════════════
 const reports = {
 
-    // ===================================================================
-    // 1. Claims Efficiency Report
-    // ===================================================================
+    // 1. Claims Efficiency — dealer/scheme/period efficiency
     claims_efficiency: {
         meta: {
             id: 'claims_efficiency',
-            title: '1. Claims Efficiency Report',
-            description: 'Ratio of claims raised vs payout value, dealer / scheme / period. Flags low-efficiency dealers & schemes.',
+            title: '1. Claims Efficiency',
+            description: 'Ratio of claim value raised vs actually paid via ISAC, per dealer / scheme / period.',
             columns: [
-                { key: 'group_label',      label: 'Group',                fmt: 'text' },
-                { key: 'claims_raised',    label: 'Claims Raised',        fmt: 'int' },
-                { key: 'claims_approved',  label: 'Claims Approved',      fmt: 'int' },
-                { key: 'claimed_amount',   label: 'Claimed (INR)',        fmt: 'inr' },
-                { key: 'approved_amount',  label: 'Approved Payout (INR)',fmt: 'inr' },
-                { key: 'approval_rate',    label: 'Approval %',           fmt: 'pct' },
-                { key: 'payout_per_claim', label: 'Payout / Claim (INR)', fmt: 'inr' },
-                { key: 'efficiency_flag',  label: 'Efficiency',           fmt: 'badge' }
+                { key: 'group_label',      label: 'Group',                 fmt: 'text' },
+                { key: 'lines',            label: 'Claim Lines',           fmt: 'int' },
+                { key: 'approved',         label: 'Approved (Paid)',       fmt: 'int' },
+                { key: 'claimed_amount',   label: 'Claimed (INR)',         fmt: 'inr' },
+                { key: 'paid_amount',      label: 'Paid via ISAC (INR)',   fmt: 'inr' },
+                { key: 'approval_rate',    label: 'Payout %',              fmt: 'pct' },
+                { key: 'payout_per_line',  label: 'Paid / Line (INR)',     fmt: 'inr' },
+                { key: 'efficiency_flag',  label: 'Efficiency',            fmt: 'badge' }
             ]
         },
-        filters: ['from', 'to', 'region', 'zone', 'dealer_code', 'scheme_type', 'payout_kind', 'group_by'],
+        filters: ['period_yyyymm','zone','dealer_code','scheme_type','scheme_kind','group_by'],
         run(db, p) {
-            const groupBy = (p.group_by || 'dealer'); // dealer | scheme | period
-            const groupExpr = groupBy === 'scheme' ? "s.scheme_name"
-                            : groupBy === 'period' ? "c.period_yyyymm"
-                            : "d.dealer_name";
-            const { whereSQL, params } = buildWhere(p, ['from','to','region','zone','dealer_code','scheme_type','payout_kind']);
+            const groupBy = (p.group_by || 'dealer');
+            const groupExpr = groupBy === 'scheme' ? 'j.scheme_name'
+                            : groupBy === 'period' ? 'j.period_yyyymm'
+                            : 'COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code)';
+            const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','dealer_code','scheme_type','scheme_kind']);
+            const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
+                ${CLAIMS_CTE}
                 SELECT ${groupExpr} AS group_label,
-                       COUNT(*) AS claims_raised,
-                       SUM(CASE WHEN c.status='APPROVED' THEN 1 ELSE 0 END) AS claims_approved,
-                       ROUND(SUM(c.claimed_amount), 2)   AS claimed_amount,
-                       ROUND(SUM(c.approved_amount), 2)  AS approved_amount,
-                       ROUND(100.0 * SUM(CASE WHEN c.status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 2) AS approval_rate,
-                       ROUND(SUM(c.approved_amount) * 1.0 / COUNT(*), 2) AS payout_per_claim
-                  FROM claims c
-                  JOIN dealers d ON d.dealer_code = c.dealer_code
-                  JOIN schemes s ON s.scheme_code = c.scheme_code
-                  ${whereSQL}
+                       COUNT(*)                                                       AS lines,
+                       SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END)             AS approved,
+                       ROUND(SUM(j.calculated_amount))                                  AS claimed_amount,
+                       ROUND(SUM(j.paid_amount))                                        AS paid_amount,
+                       ROUND(100.0 * SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS approval_rate,
+                       ROUND(SUM(j.paid_amount) * 1.0 / COUNT(*))                       AS payout_per_line
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+                 ${w}
                  GROUP BY ${groupExpr}
                  ORDER BY claimed_amount DESC
+                 LIMIT 200
             `;
             const rows = db.prepare(sql).all(params).map(r => ({
                 ...r,
-                efficiency_flag: r.approval_rate >= 80 && r.payout_per_claim >= 12000 ? 'HIGH'
-                               : r.approval_rate >= 60 ? 'MEDIUM'
+                efficiency_flag: r.approval_rate >= 80 ? 'HIGH'
+                               : r.approval_rate >= 50 ? 'MEDIUM'
                                : 'LOW (review)'
             }));
             return { rows, summary: {
-                total_claims:    rows.reduce((s,r)=>s+r.claims_raised,0),
-                total_payout:    rows.reduce((s,r)=>s+(r.approved_amount||0),0),
-                low_eff_groups:  rows.filter(r => r.efficiency_flag.startsWith('LOW')).length
+                total_lines:  rows.reduce((s,r)=>s+r.lines,0),
+                total_paid:   rows.reduce((s,r)=>s+(r.paid_amount||0),0),
+                low_groups:   rows.filter(r => r.efficiency_flag.startsWith('LOW')).length
             }};
         }
     },
 
-    // ===================================================================
-    // 2. Dealer Behavior & Risk Profiling
-    // ===================================================================
+    // 2. Dealer Risk Profiling — dealers with low payout rate / high rejection
     dealer_risk: {
         meta: {
             id: 'dealer_risk',
-            title: '2. Dealer Behavior & Risk Profiling Report',
-            description: 'Dealers categorised LOW / MEDIUM / HIGH risk by rejection %, time-barred cases, documentation deviations.',
+            title: '2. Dealer Risk Profile',
+            description: 'Dealers classified LOW / MEDIUM / HIGH risk by their share of unpaid / rejected claim lines.',
             columns: [
-                { key: 'dealer_code', label: 'Dealer Code', fmt: 'text' },
-                { key: 'dealer_name', label: 'Dealer',      fmt: 'text' },
-                { key: 'region',      label: 'Region',      fmt: 'text' },
-                { key: 'total_claims',label: 'Total Claims',fmt: 'int' },
-                { key: 'rejection_pct',     label: 'Rejection %',     fmt: 'pct' },
-                { key: 'time_barred_count', label: 'Time-Barred',     fmt: 'int' },
-                { key: 'avg_doc_score',     label: 'Avg Doc Score',   fmt: 'num' },
-                { key: 'repeat_rejections', label: 'Repeat Rejections',fmt: 'int' },
-                { key: 'risk_band',         label: 'Risk Band',       fmt: 'badge' }
+                { key: 'dealer_code',   label: 'Dealer Code',   fmt: 'text' },
+                { key: 'dealer_name',   label: 'Dealer',        fmt: 'text' },
+                { key: 'zone',          label: 'Zone',          fmt: 'text' },
+                { key: 'total_lines',   label: 'Claim Lines',   fmt: 'int' },
+                { key: 'rejection_pct', label: 'Rejection %',   fmt: 'pct' },
+                { key: 'pending_pct',   label: 'Pending %',     fmt: 'pct' },
+                { key: 'gap_amount',    label: 'Unpaid (INR)',  fmt: 'inr' },
+                { key: 'risk_band',     label: 'Risk',          fmt: 'badge' }
             ]
         },
-        filters: ['from','to','region','zone','risk_band'],
+        filters: ['period_yyyymm','zone','scheme_type','scheme_kind'],
         run(db, p) {
-            const { whereSQL, params } = buildWhere(p, ['from','to','region','zone','risk_band']);
+            const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','scheme_type','scheme_kind']);
+            const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
-                SELECT d.dealer_code,
-                       d.dealer_name,
-                       d.region,
-                       COUNT(c.claim_id)                                                               AS total_claims,
-                       ROUND(100.0 * SUM(CASE WHEN c.status='REJECTED' THEN 1 ELSE 0 END) /
-                                       NULLIF(COUNT(c.claim_id),0), 2)                                AS rejection_pct,
-                       SUM(CASE WHEN c.status='TIME_BARRED' THEN 1 ELSE 0 END)                        AS time_barred_count,
-                       ROUND(AVG(c.documentation_score), 1)                                            AS avg_doc_score,
-                       SUM(CASE WHEN c.rejection_count >= 2 THEN 1 ELSE 0 END)                         AS repeat_rejections,
-                       d.risk_band
-                  FROM dealers d
-                  LEFT JOIN claims c ON c.dealer_code = d.dealer_code
-                  LEFT JOIN schemes s ON s.scheme_code = c.scheme_code
-                  ${whereSQL}
-                 GROUP BY d.dealer_code
-                 ORDER BY CASE d.risk_band WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END,
-                          rejection_pct DESC
+                ${CLAIMS_CTE}
+                SELECT j.dealer_code,
+                       COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
+                       COALESCE(d.zone,'Unknown') AS zone,
+                       COUNT(*) AS total_lines,
+                       ROUND(100.0 * SUM(CASE WHEN j.status='REJECTED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS rejection_pct,
+                       ROUND(100.0 * SUM(CASE WHEN j.status='PENDING'  THEN 1 ELSE 0 END) / COUNT(*), 1) AS pending_pct,
+                       ROUND(SUM(j.calculated_amount - j.paid_amount)) AS gap_amount
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+                 ${w}
+                 GROUP BY j.dealer_code
+                HAVING total_lines >= 5
+                 ORDER BY gap_amount DESC
+                 LIMIT 200
             `;
-            const rows = db.prepare(sql).all(params);
+            const rows = db.prepare(sql).all(params).map(r => ({
+                ...r,
+                risk_band: (r.rejection_pct >= 40 || r.pending_pct >= 70) ? 'HIGH'
+                         : (r.rejection_pct >= 15 || r.pending_pct >= 40) ? 'MEDIUM'
+                         : 'LOW'
+            }));
             return { rows, summary: {
                 high: rows.filter(r => r.risk_band === 'HIGH').length,
                 medium: rows.filter(r => r.risk_band === 'MEDIUM').length,
@@ -155,54 +422,59 @@ const reports = {
         }
     },
 
-    // ===================================================================
-    // 3. Claim Aging vs Payout Leakage
-    // ===================================================================
+    // 3. Claim Aging vs Payout Leakage — pending age & unpaid value at risk
     aging_leakage: {
         meta: {
             id: 'aging_leakage',
-            title: '3. Claim Aging vs Payout Leakage Analysis',
-            description: 'Aging buckets vs claimed amount at risk; tactical leakage from delays.',
+            title: '3. Claim Aging & Payout Leakage',
+            description: 'How long claims stay unpaid after being calculated; realised leakage in fully-rejected schemes.',
             columns: [
-                { key: 'aging_bucket', label: 'Aging Bucket',       fmt: 'text' },
-                { key: 'claims_count', label: 'Open Claims',         fmt: 'int' },
-                { key: 'amount_at_risk', label: 'Amount At Risk (INR)', fmt: 'inr' },
-                { key: 'time_barred',  label: 'Already Time-Barred', fmt: 'int' },
+                { key: 'aging_bucket',   label: 'Bucket',              fmt: 'text' },
+                { key: 'lines',          label: 'Claim Lines',         fmt: 'int' },
+                { key: 'amount_at_risk', label: 'Amount At Risk (INR)',fmt: 'inr' },
+                { key: 'rejected_lines', label: 'Rejected Lines',      fmt: 'int' },
                 { key: 'leakage_amount', label: 'Realised Leakage (INR)', fmt: 'inr' }
             ]
         },
-        filters: ['from','to','region','zone','dealer_code','scheme_type','payout_kind'],
+        filters: ['period_yyyymm','zone','dealer_code','scheme_type','scheme_kind'],
         run(db, p) {
-            const { whereSQL, params } = buildWhere(p, ['from','to','region','zone','dealer_code','scheme_type','payout_kind']);
+            const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','dealer_code','scheme_type','scheme_kind']);
+            const w = whereSQL.replace(/scl\./g,'j.');
+            // Aging measured by scheme kind: RETAIL uses delivery date age; WHOLESALE uses ws_date age
             const sql = `
-                WITH base AS (
-                    SELECT c.*, d.region, s.scheme_type,
-                           CAST(julianday('now') - julianday(c.claim_raised_on) AS INTEGER) AS age_days
-                      FROM claims c
-                      JOIN dealers d ON d.dealer_code = c.dealer_code
-                      JOIN schemes s ON s.scheme_code = c.scheme_code
-                      ${whereSQL}
+                ${CLAIMS_CTE}, aged AS (
+                    SELECT j.*,
+                        COALESCE(rs.delivery_date, ws.ws_date, j.period_yyyymm || '-15') AS anchor_date
+                      FROM joined j
+                 LEFT JOIN retail_sale rs    ON rs.vin = j.vin
+                 LEFT JOIN wholesale_sale ws ON ws.chassis = j.vin
+                     ${w}
                 )
                 SELECT bucket AS aging_bucket,
-                       COUNT(*) AS claims_count,
-                       ROUND(SUM(CASE WHEN status IN ('PENDING','REJECTED','DISPUTED') THEN claimed_amount ELSE 0 END), 2) AS amount_at_risk,
-                       SUM(CASE WHEN status='TIME_BARRED' THEN 1 ELSE 0 END)              AS time_barred,
-                       ROUND(SUM(CASE WHEN status='TIME_BARRED' THEN claimed_amount ELSE 0 END), 2) AS leakage_amount
+                       COUNT(*) AS lines,
+                       ROUND(SUM(CASE WHEN status IN ('PENDING','REJECTED') THEN calculated_amount ELSE 0 END)) AS amount_at_risk,
+                       SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END) AS rejected_lines,
+                       ROUND(SUM(CASE WHEN status='REJECTED' THEN calculated_amount ELSE 0 END)) AS leakage_amount
                   FROM (
-                       SELECT CASE
-                                  WHEN age_days <= 15  THEN '0-15 days'
-                                  WHEN age_days <= 30  THEN '16-30 days'
-                                  WHEN age_days <= 60  THEN '31-60 days'
-                                  WHEN age_days <= 90  THEN '61-90 days'
-                                  ELSE '90+ days'
-                              END AS bucket,
-                              status, claimed_amount
-                         FROM base
+                    SELECT
+                        CASE
+                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 30  THEN '0-30 days'
+                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 60  THEN '31-60 days'
+                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 90  THEN '61-90 days'
+                            WHEN CAST(julianday('2026-06-30') - julianday(anchor_date) AS INTEGER) <= 120 THEN '91-120 days'
+                            ELSE '120+ days'
+                        END AS bucket,
+                        status, calculated_amount
+                      FROM aged
+                     WHERE calculated_amount > 0
                   )
                  GROUP BY bucket
                  ORDER BY CASE bucket
-                            WHEN '0-15 days' THEN 1 WHEN '16-30 days' THEN 2
-                            WHEN '31-60 days' THEN 3 WHEN '61-90 days' THEN 4 ELSE 5 END
+                           WHEN '0-30 days' THEN 1
+                           WHEN '31-60 days' THEN 2
+                           WHEN '61-90 days' THEN 3
+                           WHEN '91-120 days' THEN 4
+                           ELSE 5 END
             `;
             const rows = db.prepare(sql).all(params);
             return { rows, summary: {
@@ -212,50 +484,48 @@ const reports = {
         }
     },
 
-    // ===================================================================
-    // 4. Scheme Effectiveness & Region-wise Dashboard
-    // ===================================================================
+    // 4. Scheme Effectiveness & Zone-wise Dashboard
     scheme_effectiveness: {
         meta: {
             id: 'scheme_effectiveness',
-            title: '4. Scheme Effectiveness & Region-wise Dashboard',
-            description: 'Scheme-wise claim volume vs payout, region-wise comparison across CORPORATE / EXCHANGE / LOYALTY / RETAIL.',
+            title: '4. Scheme Effectiveness & Zone Dashboard',
+            description: 'Scheme-wise volume vs payout, zone-wise comparison across DAN / Demo / Regional Booster / Loyalty / Corporate / Exchange / Volume Bonus.',
             columns: [
-                { key: 'scheme_name', label: 'Scheme',      fmt: 'text' },
-                { key: 'scheme_type', label: 'Type',        fmt: 'text' },
-                { key: 'region',      label: 'Region',      fmt: 'text' },
-                { key: 'claims_count',label: 'Claims',      fmt: 'int' },
-                { key: 'approved_count', label: 'Approved',  fmt: 'int' },
-                { key: 'approved_amount',label: 'Payout (INR)',fmt: 'inr' },
-                { key: 'target_payout', label: 'Target (INR)', fmt: 'inr' },
-                { key: 'achievement_pct', label: 'Achievement %', fmt: 'pct' },
-                { key: 'roi_score',     label: 'ROI Score',   fmt: 'badge' }
+                { key: 'scheme_name',    label: 'Scheme',              fmt: 'text' },
+                { key: 'scheme_type',    label: 'Type',                fmt: 'text' },
+                { key: 'zone',           label: 'Zone',                fmt: 'text' },
+                { key: 'lines',          label: 'Claim Lines',         fmt: 'int' },
+                { key: 'approved',       label: 'Approved',            fmt: 'int' },
+                { key: 'paid_amount',    label: 'Paid (INR)',          fmt: 'inr' },
+                { key: 'target_payout',  label: 'Target (INR)',        fmt: 'inr' },
+                { key: 'achievement_pct',label: 'Achievement %',       fmt: 'pct' },
+                { key: 'roi_score',      label: 'Impact',              fmt: 'badge' }
             ]
         },
-        filters: ['from','to','region','scheme_type','payout_kind'],
+        filters: ['period_yyyymm','zone','scheme_type','scheme_kind'],
         run(db, p) {
-            const { whereSQL, params } = buildWhere(p, ['from','to','region','scheme_type','payout_kind']);
+            const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','scheme_type','scheme_kind']);
+            const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
-                SELECT s.scheme_name,
-                       s.scheme_type,
-                       d.region,
-                       COUNT(c.claim_id)                                                AS claims_count,
-                       SUM(CASE WHEN c.status='APPROVED' THEN 1 ELSE 0 END)              AS approved_count,
-                       ROUND(SUM(c.approved_amount), 2)                                  AS approved_amount,
-                       s.target_payout,
-                       ROUND(100.0 * SUM(c.approved_amount) / NULLIF(s.target_payout,0), 2) AS achievement_pct
-                  FROM claims c
-                  JOIN dealers d ON d.dealer_code = c.dealer_code
-                  JOIN schemes s ON s.scheme_code = c.scheme_code
-                  ${whereSQL}
-                 GROUP BY s.scheme_code, d.region
-                 ORDER BY s.scheme_name, d.region
+                ${CLAIMS_CTE}
+                SELECT j.scheme_name, j.scheme_type,
+                       COALESCE(d.zone,'Unknown') AS zone,
+                       COUNT(*) AS lines,
+                       SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) AS approved,
+                       ROUND(SUM(j.paid_amount)) AS paid_amount,
+                       j.target_payout,
+                       ROUND(100.0 * SUM(j.paid_amount) / NULLIF(j.target_payout,0), 1) AS achievement_pct
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+                 ${w}
+                 GROUP BY j.scheme_code, COALESCE(d.zone,'Unknown')
+                 ORDER BY j.scheme_name, zone
             `;
             const rows = db.prepare(sql).all(params).map(r => ({
                 ...r,
                 roi_score: r.achievement_pct >= 80 ? 'STRONG'
                          : r.achievement_pct >= 50 ? 'AVERAGE'
-                         : 'UNDERPERFORMING'
+                         : 'UNDER'
             }));
             return { rows, summary: {
                 schemes: new Set(rows.map(r=>r.scheme_name)).size,
@@ -264,266 +534,242 @@ const reports = {
         }
     },
 
-    // ===================================================================
-    // 5. Predictive & Provision Forecast
-    // ===================================================================
+    // 5. Forecast (very simple — monthly avg × 6 months)
     forecast: {
         meta: {
             id: 'forecast',
-            title: '5. Predictive & Provision Forecast (Bonus & Tactical)',
-            description: 'Trend-based forecast for next 1–2 quarters; provisioning adequacy flag.',
+            title: '5. Provision & Payout Forecast',
+            description: 'Projected next-6-month payout based on the observed Mar-26 run-rate. Provision = forecast × 1.10.',
             columns: [
-                { key: 'period',          label: 'Period',          fmt: 'text' },
-                { key: 'kind',            label: 'Kind',            fmt: 'text' },
-                { key: 'historical_avg',  label: 'Hist. Avg / mo (INR)',  fmt: 'inr' },
-                { key: 'forecast_amount', label: 'Forecast Payout (INR)', fmt: 'inr' },
-                { key: 'provision_required', label: 'Provision Reqd. (INR)', fmt: 'inr' },
-                { key: 'adequacy_flag',   label: 'Adequacy', fmt: 'badge' }
+                { key: 'period',             label: 'Period',                fmt: 'text' },
+                { key: 'kind',               label: 'Scheme Kind',           fmt: 'text' },
+                { key: 'historical_avg',     label: 'Baseline / mo (INR)',   fmt: 'inr' },
+                { key: 'forecast_amount',    label: 'Forecast Payout (INR)', fmt: 'inr' },
+                { key: 'provision_required', label: 'Provision Reqd (INR)',  fmt: 'inr' },
+                { key: 'adequacy_flag',      label: 'Adequacy',              fmt: 'badge' }
             ]
         },
-        filters: ['payout_kind','region'],
+        filters: ['zone','scheme_kind'],
         run(db, p) {
-            const { whereSQL, params } = buildWhere(p, ['region','payout_kind']);
-            const sql = `
-                SELECT c.period_yyyymm AS period,
-                       c.payout_kind   AS kind,
-                       ROUND(SUM(c.approved_amount), 2) AS payout
-                  FROM claims c
-                  JOIN dealers d ON d.dealer_code = c.dealer_code
-                  ${whereSQL}
-                 GROUP BY c.period_yyyymm, c.payout_kind
-                 ORDER BY c.period_yyyymm
-            `;
-            const hist = db.prepare(sql).all(params);
-            // Compute monthly average per kind, then forecast next 6 months at 1.05x trend
-            const byKind = {};
-            hist.forEach(h => {
-                byKind[h.kind] = byKind[h.kind] || [];
-                byKind[h.kind].push(h.payout);
-            });
-            const today = new Date('2026-06-10');
-            const rows = [];
-            Object.keys(byKind).forEach(kind => {
-                const arr = byKind[kind];
-                const avg = arr.reduce((s,v)=>s+v,0) / Math.max(1, arr.length);
-                const recent = arr.slice(-3).reduce((s,v)=>s+v,0) / Math.max(1, Math.min(3, arr.length));
-                for (let i = 1; i <= 6; i++) {
-                    const d = new Date(today); d.setMonth(d.getMonth() + i);
+            const { whereSQL, params } = buildWhere(p, ['zone','scheme_kind']);
+            const w = whereSQL.replace(/scl\./g,'j.');
+            const rows = db.prepare(`
+                ${CLAIMS_CTE}
+                SELECT j.scheme_kind AS kind,
+                       ROUND(SUM(j.paid_amount)) AS payout
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+                 ${w}
+                 GROUP BY j.scheme_kind
+            `).all(params);
+            const out = [];
+            const startMonth = new Date('2026-04-01');
+            rows.forEach(base => {
+                const avg = base.payout || 0;
+                for (let i = 0; i < 6; i++) {
+                    const d = new Date(startMonth); d.setMonth(d.getMonth() + i);
                     const period = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-                    const trendFactor = recent / Math.max(1, avg);
-                    const forecast = Math.round(avg * Math.min(1.5, Math.max(0.6, trendFactor)));
-                    const provision = Math.round(forecast * 1.10);
-                    rows.push({
-                        period, kind,
-                        historical_avg: Math.round(avg),
+                    const forecast = Math.round(avg * (1 + 0.02 * i)); // 2% growth
+                    out.push({
+                        period, kind: base.kind || 'MIXED',
+                        historical_avg: avg,
                         forecast_amount: forecast,
-                        provision_required: provision,
-                        adequacy_flag: trendFactor > 1.15 ? 'INCREASE' : trendFactor < 0.85 ? 'REDUCE' : 'ADEQUATE'
+                        provision_required: Math.round(forecast * 1.10),
+                        adequacy_flag: i < 2 ? 'ADEQUATE' : (i < 4 ? 'WATCH' : 'INCREASE')
                     });
                 }
             });
-            return { rows, summary: {
-                next_quarter_total: rows.filter((_,i)=>i<6).reduce((s,r)=>s+r.forecast_amount,0)
+            return { rows: out, summary: {
+                next_quarter_total: out.filter((_,i)=>i%6<3).reduce((s,r)=>s+r.forecast_amount,0)
             }};
         }
     },
 
-    // ===================================================================
-    // 6. Documentation Quality Index (DQI)
-    // ===================================================================
+    // 6. Documentation Quality Index — proxied via calc-vs-paid completeness
     dqi: {
         meta: {
             id: 'dqi',
-            title: '6. Documentation Quality Index (DQI) Report',
-            description: 'Dealer-level documentation completeness scoring + top documentation gaps.',
+            title: '6. Documentation Quality Index',
+            description: 'Dealer-level documentation quality proxy: % of eligible claim lines that actually reach ISAC payment.',
             columns: [
-                { key: 'dealer_code', label: 'Dealer Code', fmt: 'text' },
-                { key: 'dealer_name', label: 'Dealer',      fmt: 'text' },
-                { key: 'avg_score',   label: 'Avg DQI (0-100)', fmt: 'num' },
-                { key: 'claims_evaluated', label: 'Claims',  fmt: 'int' },
-                { key: 'top_gap',     label: 'Top Gap',     fmt: 'text' },
-                { key: 'avg_approval_days', label: 'Avg Days to Approval', fmt: 'num' },
-                { key: 'tier',        label: 'Tier',        fmt: 'badge' }
+                { key: 'dealer_code',       label: 'Dealer Code',           fmt: 'text' },
+                { key: 'dealer_name',       label: 'Dealer',                fmt: 'text' },
+                { key: 'lines_evaluated',   label: 'Lines',                 fmt: 'int' },
+                { key: 'paid_pct',          label: 'Paid %',                fmt: 'pct' },
+                { key: 'top_scheme',        label: 'Top Scheme',            fmt: 'text' },
+                { key: 'tier',              label: 'Tier',                  fmt: 'badge' }
             ]
         },
-        filters: ['from','to','region','dealer_code','scheme_type'],
+        filters: ['period_yyyymm','zone','dealer_code','scheme_type'],
         run(db, p) {
-            const { whereSQL, params } = buildWhere(p, ['from','to','region','dealer_code','scheme_type']);
-            const sql = `
-                SELECT d.dealer_code,
-                       d.dealer_name,
-                       ROUND(AVG(c.documentation_score), 1)             AS avg_score,
-                       COUNT(c.claim_id)                                 AS claims_evaluated,
-                       ROUND(AVG(CASE WHEN c.approved_on IS NOT NULL
-                                      THEN julianday(c.approved_on) - julianday(c.claim_raised_on)
-                                      END), 1)                            AS avg_approval_days,
-                       GROUP_CONCAT(c.doc_gap_tags, ',')                  AS gaps_blob
-                  FROM dealers d
-                  JOIN claims  c ON c.dealer_code = d.dealer_code
-                  JOIN schemes s ON s.scheme_code = c.scheme_code
-                  ${whereSQL}
-                 GROUP BY d.dealer_code
-                 ORDER BY avg_score DESC
-            `;
-            const raw = db.prepare(sql).all(params);
-            const rows = raw.map(r => {
-                const counts = {};
-                (r.gaps_blob || '').split(',').filter(Boolean).forEach(g => {
-                    counts[g] = (counts[g]||0) + 1;
-                });
-                const top = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0];
-                const tier = r.avg_score >= 90 ? 'GOLD'
-                           : r.avg_score >= 75 ? 'SILVER'
-                           : r.avg_score >= 60 ? 'BRONZE'
-                           : 'NEEDS COACHING';
-                const out = { ...r, top_gap: top ? `${top[0]} (${top[1]})` : '—', tier };
-                delete out.gaps_blob;
-                return out;
-            });
+            const { whereSQL, params } = buildWhere(p, ['period_yyyymm','zone','dealer_code','scheme_type']);
+            const w = whereSQL.replace(/scl\./g,'j.');
+            const rows = db.prepare(`
+                ${CLAIMS_CTE}
+                SELECT j.dealer_code,
+                       COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
+                       COUNT(*) AS lines_evaluated,
+                       ROUND(100.0 * SUM(CASE WHEN j.status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS paid_pct,
+                       (SELECT scheme_name FROM (
+                           SELECT j2.scheme_name, SUM(j2.paid_amount) AS s
+                             FROM joined j2 WHERE j2.dealer_code = j.dealer_code
+                             GROUP BY j2.scheme_name ORDER BY s DESC LIMIT 1)) AS top_scheme
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+                 ${w}
+                 GROUP BY j.dealer_code
+                HAVING lines_evaluated >= 5
+                 ORDER BY paid_pct DESC
+                 LIMIT 200
+            `).all(params).map(r => ({
+                ...r,
+                tier: r.paid_pct >= 85 ? 'GOLD'
+                    : r.paid_pct >= 60 ? 'SILVER'
+                    : r.paid_pct >= 30 ? 'BRONZE'
+                    : 'NEEDS COACHING'
+            }));
             return { rows, summary: {
-                gold:   rows.filter(r=>r.tier==='GOLD').length,
-                coach:  rows.filter(r=>r.tier==='NEEDS COACHING').length
+                gold: rows.filter(r=>r.tier==='GOLD').length,
+                coach: rows.filter(r=>r.tier==='NEEDS COACHING').length
             }};
         }
     },
 
-    // ===================================================================
-    // 7. Dealer Lifecycle & FNF Risk Tracker
-    // ===================================================================
+    // 7. Dealer Lifecycle & FNF Risk — proxied via zero-activity + unpaid exposure
     fnf_tracker: {
         meta: {
             id: 'fnf_tracker',
-            title: '7. Dealer Lifecycle & FNF Risk Tracker',
-            description: 'Dealers nearing exit, open claim exposure prior to FNF, dispute pendency.',
+            title: '7. Dealer Exposure Tracker',
+            description: 'Dealers with unpaid claim lines and their exposure; flag those with zero retail/wholesale activity as at-risk.',
             columns: [
-                { key: 'dealer_code',  label: 'Dealer Code',  fmt: 'text' },
-                { key: 'dealer_name',  label: 'Dealer',       fmt: 'text' },
-                { key: 'fnf_status',   label: 'FNF Status',   fmt: 'badge' },
-                { key: 'fnf_target_date', label: 'FNF Target', fmt: 'text' },
-                { key: 'open_claims',  label: 'Open Claims',  fmt: 'int' },
-                { key: 'open_exposure',label: 'Open Exposure (INR)', fmt: 'inr' },
-                { key: 'disputes',     label: 'Disputes',     fmt: 'int' },
-                { key: 'expected_settlement', label: 'Expected Settle (INR)', fmt: 'inr' }
+                { key: 'dealer_code',    label: 'Dealer Code',              fmt: 'text' },
+                { key: 'dealer_name',    label: 'Dealer',                   fmt: 'text' },
+                { key: 'activity_flag',  label: 'Activity',                 fmt: 'badge' },
+                { key: 'open_lines',     label: 'Open (Pending) Lines',     fmt: 'int' },
+                { key: 'open_exposure',  label: 'Open Exposure (INR)',      fmt: 'inr' },
+                { key: 'rejected_lines', label: 'Rejected Lines',           fmt: 'int' },
+                { key: 'paid_ytd',       label: 'Paid this Period (INR)',   fmt: 'inr' }
             ]
         },
-        filters: ['fnf_status','region','risk_band'],
+        filters: ['zone'],
         run(db, p) {
-            const { whereSQL, params } = buildWhere(p, ['fnf_status','region','risk_band']);
-            const sql = `
-                SELECT d.dealer_code, d.dealer_name, d.fnf_status, d.fnf_target_date,
-                       SUM(CASE WHEN c.status IN ('PENDING','REJECTED','DISPUTED') THEN 1 ELSE 0 END) AS open_claims,
-                       ROUND(SUM(CASE WHEN c.status IN ('PENDING','REJECTED','DISPUTED') THEN c.claimed_amount ELSE 0 END),2) AS open_exposure,
-                       SUM(c.is_dispute) AS disputes,
-                       ROUND(SUM(CASE WHEN c.status IN ('PENDING') THEN c.claimed_amount * 0.85 ELSE 0 END), 2) AS expected_settlement
-                  FROM dealers d
-                  LEFT JOIN claims c ON c.dealer_code = d.dealer_code
-                  LEFT JOIN schemes s ON s.scheme_code = c.scheme_code
-                  ${whereSQL}
-                 GROUP BY d.dealer_code
-                 HAVING d.fnf_status <> 'ACTIVE' OR open_exposure > 0
-                 ORDER BY CASE d.fnf_status WHEN 'NEARING_EXIT' THEN 0 WHEN 'EXITED' THEN 1 ELSE 2 END,
-                          open_exposure DESC
-            `;
-            const rows = db.prepare(sql).all(params);
+            const { whereSQL, params } = buildWhere(p, ['zone']);
+            const w = whereSQL.replace(/scl\./g,'j.');
+            const rows = db.prepare(`
+                ${CLAIMS_CTE}
+                SELECT j.dealer_code,
+                       COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
+                       COALESCE((SELECT COUNT(*) FROM retail_sale WHERE dealer_code = j.dealer_code AND period_yyyymm='2026-03'),0) +
+                       COALESCE((SELECT COUNT(*) FROM wholesale_sale WHERE dealer_code = j.dealer_code AND period_yyyymm='2026-03'),0) AS activity,
+                       SUM(CASE WHEN j.status='PENDING'  THEN 1 ELSE 0 END) AS open_lines,
+                       ROUND(SUM(CASE WHEN j.status='PENDING'  THEN j.calculated_amount ELSE 0 END)) AS open_exposure,
+                       SUM(CASE WHEN j.status='REJECTED' THEN 1 ELSE 0 END) AS rejected_lines,
+                       ROUND(SUM(j.paid_amount)) AS paid_ytd
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+                 ${w}
+                 GROUP BY j.dealer_code
+                HAVING open_exposure > 0 OR activity = 0
+                 ORDER BY open_exposure DESC
+                 LIMIT 200
+            `).all(params).map(r => ({
+                ...r,
+                activity_flag: r.activity === 0 ? 'DORMANT'
+                             : r.activity < 5   ? 'LOW ACTIVITY'
+                             : 'ACTIVE'
+            }));
             return { rows, summary: {
-                nearing_exit: rows.filter(r => r.fnf_status === 'NEARING_EXIT').length,
+                dormant: rows.filter(r => r.activity_flag === 'DORMANT').length,
                 total_exposure: rows.reduce((s,r)=>s+(r.open_exposure||0),0)
             }};
         }
     },
 
-    // ===================================================================
-    // 8. Corporate & Exchange Claim Dispute Heatmap
-    // ===================================================================
+    // 8. Corporate & Exchange Dispute Heatmap — zone × scheme-type unpaid heatmap
     dispute_heatmap: {
         meta: {
             id: 'dispute_heatmap',
-            title: '8. Corporate & Exchange Claim Dispute Heatmap',
-            description: 'Disputes by dealer / region / scheme; root-cause taxonomy.',
+            title: '8. Corporate & Exchange Dispute Heatmap',
+            description: 'Zone × scheme-type matrix of unpaid Corporate/Exchange claim lines with root-cause breakdown from Remarks.',
             viz: 'heatmap',
             columns: [
-                { key: 'dealer_name',     label: 'Dealer',       fmt: 'text' },
-                { key: 'region',          label: 'Region',       fmt: 'text' },
-                { key: 'scheme_type',     label: 'Scheme Type',  fmt: 'text' },
-                { key: 'dispute_count',   label: 'Disputes',     fmt: 'int' },
-                { key: 'root_cause_top',  label: 'Top Root Cause',fmt: 'text' },
-                { key: 'avg_resolution_days', label: 'Avg Resolution (d)', fmt: 'num' },
-                { key: 'heat',            label: 'Heat',         fmt: 'badge' }
+                { key: 'dealer_name',       label: 'Dealer',           fmt: 'text' },
+                { key: 'zone',              label: 'Zone',             fmt: 'text' },
+                { key: 'scheme_type',       label: 'Scheme Type',      fmt: 'text' },
+                { key: 'unpaid_lines',      label: 'Unpaid Lines',     fmt: 'int' },
+                { key: 'unpaid_amount',     label: 'Unpaid (INR)',     fmt: 'inr' },
+                { key: 'top_remark',        label: 'Top Remark',       fmt: 'text' },
+                { key: 'heat',              label: 'Heat',             fmt: 'badge' }
             ]
         },
-        filters: ['from','to','region','scheme_type','dealer_code'],
+        filters: ['period_yyyymm','zone','scheme_type'],
         run(db, p) {
             const filters = { ...p };
-            // Dispute heatmap focuses on Corporate + Exchange by default
-            if (!filters.scheme_type) filters._auto_corp_exch = 1;
-            const { whereSQL, params } = buildWhere(filters, ['from','to','region','scheme_type','dealer_code']);
-            const auto = filters._auto_corp_exch ? (whereSQL ? " AND s.scheme_type IN ('CORPORATE','EXCHANGE')" : "WHERE s.scheme_type IN ('CORPORATE','EXCHANGE')") : '';
-            const sql = `
-                SELECT d.dealer_name,
-                       d.region,
-                       s.scheme_type,
-                       SUM(c.is_dispute) AS dispute_count,
-                       (SELECT dispute_root_cause FROM claims c2
-                          WHERE c2.dealer_code = d.dealer_code AND c2.is_dispute = 1
-                          GROUP BY dispute_root_cause ORDER BY COUNT(*) DESC LIMIT 1) AS root_cause_top,
-                       ROUND(AVG(CASE WHEN ev.event_date IS NOT NULL
-                                      THEN julianday(ev.event_date) - julianday(c.rejected_on) END), 1) AS avg_resolution_days
-                  FROM claims c
-                  JOIN dealers d ON d.dealer_code = c.dealer_code
-                  JOIN schemes s ON s.scheme_code = c.scheme_code
-             LEFT JOIN claim_events ev ON ev.claim_id = c.claim_id AND ev.event_type = 'DISPUTE_CLOSED'
-                  ${whereSQL}${auto}
-                 GROUP BY d.dealer_code, s.scheme_type
-                 HAVING dispute_count > 0
-                 ORDER BY dispute_count DESC
-            `;
-            const rows = db.prepare(sql).all(params).map(r => ({
+            if (!filters.scheme_type) filters._auto = 1;
+            const { whereSQL, params } = buildWhere(filters, ['period_yyyymm','zone','scheme_type']);
+            const auto = filters._auto ? (whereSQL ? " AND s.scheme_type IN ('CORPORATE','EXCHANGE')" : "WHERE s.scheme_type IN ('CORPORATE','EXCHANGE')") : '';
+            const w = (whereSQL + auto).replace(/scl\./g,'j.');
+
+            const rows = db.prepare(`
+                ${CLAIMS_CTE}
+                SELECT COALESCE(d.dealer_short_name, d.dealer_name, j.dealer_code) AS dealer_name,
+                       COALESCE(d.zone,'Unknown') AS zone,
+                       j.scheme_type,
+                       SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN 1 ELSE 0 END) AS unpaid_lines,
+                       ROUND(SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN j.calculated_amount ELSE 0 END)) AS unpaid_amount,
+                       (SELECT j2.remarks FROM joined j2
+                          WHERE j2.dealer_code = j.dealer_code
+                            AND j2.scheme_type = j.scheme_type
+                            AND j2.remarks IS NOT NULL AND j2.remarks <> ''
+                          GROUP BY j2.remarks ORDER BY COUNT(*) DESC LIMIT 1) AS top_remark
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+             LEFT JOIN scheme s ON s.scheme_code = j.scheme_code
+                 ${w}
+                 GROUP BY j.dealer_code, j.scheme_type
+                HAVING unpaid_lines > 0
+                 ORDER BY unpaid_amount DESC
+                 LIMIT 100
+            `).all(params).map(r => ({
                 ...r,
-                heat: r.dispute_count >= 8 ? 'HOT'
-                    : r.dispute_count >= 4 ? 'WARM'
-                    : 'COOL'
+                heat: r.unpaid_lines >= 20 ? 'HOT' : r.unpaid_lines >= 8 ? 'WARM' : 'COOL'
             }));
 
-            // ─── Region × Scheme-type matrix (the actual heatmap) ──────
-            const matrixSql = `
-                SELECT d.region                AS region,
-                       s.scheme_type           AS scheme_type,
-                       SUM(c.is_dispute)       AS disputes,
-                       ROUND(AVG(CASE WHEN ev.event_date IS NOT NULL
-                                      THEN julianday(ev.event_date) - julianday(c.rejected_on) END), 1) AS avg_resolution_days
-                  FROM claims c
-                  JOIN dealers d ON d.dealer_code = c.dealer_code
-                  JOIN schemes s ON s.scheme_code = c.scheme_code
-             LEFT JOIN claim_events ev ON ev.claim_id = c.claim_id AND ev.event_type = 'DISPUTE_CLOSED'
-                  ${whereSQL}${auto}
-                 GROUP BY d.region, s.scheme_type
-                 HAVING disputes > 0
-            `;
-            const matrixRows = db.prepare(matrixSql).all(params);
+            const matrixRows = db.prepare(`
+                ${CLAIMS_CTE}
+                SELECT COALESCE(d.zone,'Unknown') AS zone,
+                       j.scheme_type,
+                       SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN 1 ELSE 0 END) AS disputes,
+                       ROUND(SUM(CASE WHEN j.status IN ('PENDING','REJECTED') THEN j.calculated_amount ELSE 0 END)) AS unpaid_amount
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+             LEFT JOIN scheme s ON s.scheme_code = j.scheme_code
+                 ${w}
+                 GROUP BY COALESCE(d.zone,'Unknown'), j.scheme_type
+                HAVING disputes > 0
+            `).all(params);
 
-            // ─── Root-cause distribution (Corporate + Exchange) ───────
-            const rootSql = `
-                SELECT c.dispute_root_cause AS cause, COUNT(*) AS cnt
-                  FROM claims c
-                  JOIN dealers d ON d.dealer_code = c.dealer_code
-                  JOIN schemes s ON s.scheme_code = c.scheme_code
-                 WHERE c.is_dispute = 1 AND c.dispute_root_cause IS NOT NULL
-                   ${whereSQL ? whereSQL.replace(/^WHERE/, 'AND') : ''}
-                   ${auto.replace(/^WHERE/, 'AND')}
-                 GROUP BY c.dispute_root_cause
+            const rootCauses = db.prepare(`
+                ${CLAIMS_CTE}
+                SELECT COALESCE(NULLIF(j.remarks,''),'(none)') AS cause,
+                       COUNT(*) AS cnt
+                  FROM joined j
+             LEFT JOIN dealer d ON d.dealer_code = j.dealer_code
+             LEFT JOIN scheme s ON s.scheme_code = j.scheme_code
+                 ${w ? w + ' AND' : 'WHERE'} j.status IN ('PENDING','REJECTED')
+                 GROUP BY cause
                  ORDER BY cnt DESC
-            `;
-            const rootCauses = db.prepare(rootSql).all(params);
+                 LIMIT 8
+            `).all(params);
 
-            // Build pivoted matrix the frontend can render directly
-            const regions = [...new Set(matrixRows.map(r => r.region))].sort();
+            const zones = [...new Set(matrixRows.map(r => r.zone))].sort();
             const schemeTypes = [...new Set(matrixRows.map(r => r.scheme_type))].sort();
             const cells = {};
             let maxDisputes = 0;
             matrixRows.forEach(r => {
-                cells[`${r.region}::${r.scheme_type}`] = {
+                cells[`${r.zone}::${r.scheme_type}`] = {
                     disputes: r.disputes,
-                    avg_resolution_days: r.avg_resolution_days
+                    unpaid_amount: r.unpaid_amount
                 };
                 if (r.disputes > maxDisputes) maxDisputes = r.disputes;
             });
@@ -532,88 +778,80 @@ const reports = {
                 rows,
                 summary: {
                     hot_dealers: rows.filter(r => r.heat === 'HOT').length,
-                    total_disputes: rows.reduce((s, r) => s + (r.dispute_count || 0), 0),
-                    regions_affected: regions.length
+                    total_disputes: rows.reduce((s,r)=>s+(r.unpaid_lines||0),0),
+                    zones_affected: zones.length
                 },
-                heatmap: {
-                    regions, scheme_types: schemeTypes, cells, max: maxDisputes
-                },
+                heatmap: { regions: zones, scheme_types: schemeTypes, cells, max: maxDisputes },
                 root_causes: rootCauses
             };
         }
     },
 
-    // ===================================================================
-    // 9. Sales Enablement Impact
-    // ===================================================================
+    // 9. Sales Enablement Impact — DAN support band vs downstream scheme success
     sales_enablement: {
         meta: {
             id: 'sales_enablement',
-            title: '9. Sales Enablement Impact Report',
-            description: 'Correlation between upfront / DAN support and claim success rate, settlement speed.',
+            title: '9. Sales Enablement Impact (DAN → Downstream)',
+            description: 'Group dealers by their DAN Support payout band and compare their downstream (non-DAN) scheme payout rates.',
             columns: [
-                { key: 'support_band',      label: 'Upfront Support Band', fmt: 'text' },
-                { key: 'dealer_count',      label: 'Dealers',              fmt: 'int' },
-                { key: 'claims',            label: 'Claims',               fmt: 'int' },
-                { key: 'success_rate',      label: 'Success %',            fmt: 'pct' },
-                { key: 'avg_settlement_days', label: 'Avg Settlement (d)', fmt: 'num' },
-                { key: 'payout_per_claim',  label: 'Payout / Claim (INR)', fmt: 'inr' },
-                { key: 'impact_signal',     label: 'Impact',               fmt: 'badge' }
+                { key: 'support_band',   label: 'DAN Support Band',     fmt: 'text' },
+                { key: 'dealer_count',   label: 'Dealers',              fmt: 'int' },
+                { key: 'lines',          label: 'Downstream Lines',     fmt: 'int' },
+                { key: 'success_rate',   label: 'Payout %',             fmt: 'pct' },
+                { key: 'payout_per_line',label: 'Paid / Line (INR)',    fmt: 'inr' },
+                { key: 'impact_signal',  label: 'Impact',               fmt: 'badge' }
             ]
         },
-        filters: ['from','to','region'],
+        filters: ['zone'],
         run(db, p) {
-            const { whereSQL, params } = buildWhere(p, ['from','to','region']);
+            const { whereSQL, params } = buildWhere(p, ['zone']);
+            const w = whereSQL.replace(/scl\./g,'j.');
             const sql = `
-                WITH base AS (
-                    SELECT d.dealer_code,
+                ${CLAIMS_CTE},
+                dan_paid AS (
+                    SELECT dealer_code, SUM(amount_payable) AS dan_amount
+                      FROM isac_payment_line
+                     WHERE scheme_code = 'SKSL2026M03_555'
+                     GROUP BY dealer_code
+                ),
+                banded AS (
+                    SELECT j.*,
                            CASE
-                               WHEN d.upfront_support = 0           THEN 'No Support'
-                               WHEN d.upfront_support < 100000      THEN '<1L'
-                               WHEN d.upfront_support < 300000      THEN '1L-3L'
-                               WHEN d.upfront_support < 500000      THEN '3L-5L'
-                               ELSE '5L+'
-                           END AS support_band,
-                           c.status,
-                           c.approved_amount,
-                           c.approved_on,
-                           c.settlement_date,
-                           c.claim_raised_on
-                      FROM dealers d
-                      JOIN claims  c ON c.dealer_code = d.dealer_code
-                      JOIN schemes s ON s.scheme_code = c.scheme_code
-                      ${whereSQL}
+                               WHEN COALESCE(dp.dan_amount,0) = 0        THEN 'No DAN'
+                               WHEN dp.dan_amount < 100000               THEN '< 1 Lakh'
+                               WHEN dp.dan_amount < 300000               THEN '1-3 Lakh'
+                               WHEN dp.dan_amount < 500000               THEN '3-5 Lakh'
+                               ELSE '5 Lakh+'
+                           END AS support_band
+                      FROM joined j
+                 LEFT JOIN dan_paid dp ON dp.dealer_code = j.dealer_code
+                 LEFT JOIN dealer d    ON d.dealer_code  = j.dealer_code
+                     ${w ? w + ' AND' : 'WHERE'} j.scheme_code <> 'SKSL2026M03_555'
                 )
                 SELECT support_band,
-                       COUNT(DISTINCT dealer_code)                                       AS dealer_count,
-                       COUNT(*)                                                          AS claims,
-                       ROUND(100.0 * SUM(CASE WHEN status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate,
-                       ROUND(AVG(CASE WHEN settlement_date IS NOT NULL
-                                      THEN julianday(settlement_date) - julianday(claim_raised_on) END), 1) AS avg_settlement_days,
-                       ROUND(SUM(approved_amount) * 1.0 / COUNT(*), 2)                   AS payout_per_claim
-                  FROM base
+                       COUNT(DISTINCT dealer_code) AS dealer_count,
+                       COUNT(*)                    AS lines,
+                       ROUND(100.0 * SUM(CASE WHEN status='APPROVED' THEN 1 ELSE 0 END) / COUNT(*), 1) AS success_rate,
+                       ROUND(SUM(paid_amount) * 1.0 / COUNT(*)) AS payout_per_line
+                  FROM banded
                  GROUP BY support_band
                  ORDER BY CASE support_band
-                            WHEN 'No Support' THEN 0 WHEN '<1L' THEN 1
-                            WHEN '1L-3L' THEN 2 WHEN '3L-5L' THEN 3 ELSE 4 END
+                            WHEN 'No DAN' THEN 0 WHEN '< 1 Lakh' THEN 1
+                            WHEN '1-3 Lakh' THEN 2 WHEN '3-5 Lakh' THEN 3 ELSE 4 END
             `;
-            const rows = db.prepare(sql).all(params).map((r, _, all) => ({
+            const rows = db.prepare(sql).all(params);
+            const baseline = rows.find(r => r.support_band === 'No DAN');
+            const withImpact = rows.map(r => ({
                 ...r,
-                impact_signal: (() => {
-                    const baseline = all.find(x => x.support_band === 'No Support');
-                    if (!baseline || !baseline.success_rate) return '—';
-                    const lift = (r.success_rate - baseline.success_rate);
-                    return lift > 8 ? 'STRONG +' + lift.toFixed(1) + 'pp'
-                         : lift > 3 ? 'MODERATE +' + lift.toFixed(1) + 'pp'
-                         : lift < -3 ? 'NEGATIVE'
-                         : 'NEUTRAL';
-                })()
+                impact_signal: !baseline || baseline === r ? '—' :
+                    (r.success_rate - baseline.success_rate) > 8 ? `STRONG +${(r.success_rate - baseline.success_rate).toFixed(1)}pp`
+                    : (r.success_rate - baseline.success_rate) > 3 ? `MODERATE +${(r.success_rate - baseline.success_rate).toFixed(1)}pp`
+                    : (r.success_rate - baseline.success_rate) < -3 ? 'NEGATIVE'
+                    : 'NEUTRAL'
             }));
-            return { rows, summary: {
-                bands: rows.length
-            }};
+            return { rows: withImpact, summary: { bands: withImpact.length } };
         }
     }
 };
 
-module.exports = { reports, buildWhere };
+module.exports = { reports, buildWhere, kpis, charts };
